@@ -6,6 +6,12 @@ import datetime as dt
 from AlphaMachine_core.engine import SharpeBacktestEngine
 from AlphaMachine_core.reporting_no_sparklines import export_results_to_excel
 
+# --- einfacher Passwort-Gate ---------------------------------
+pwd = st.sidebar.text_input("Passwort", type="password")
+if pwd != st.secrets["APP_PW"]:
+    st.warning("🔒 Bitte korrektes Passwort eingeben.")
+    st.stop()
+
 # ----------------------------------------------------------------------------
 # Page‑Config & Caching
 # ----------------------------------------------------------------------------
