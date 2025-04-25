@@ -22,7 +22,7 @@ from AlphaMachine_core.config import (
 )
 
 # ------------------------------------------------------------
-# 1) Page‑Config → MUSS die **erste** Streamlit‑Anweisung sein
+# 1) Page‑Config
 # ------------------------------------------------------------
 
 st.set_page_config("AlphaMachine Backtester", layout="wide")
@@ -126,45 +126,93 @@ if run_btn and uploaded:
     st.success("Backtest fertig ✅")
 
     # --------------------------------------------------------
-    # Tabs für Auswertungen
+    # Tabs (Portfolio zuerst) + alle Excel‑Sheets
     # --------------------------------------------------------
 
-    tabs = st.tabs(["Dashboard", "Portfolio", "Daily", "Monthly Allo", "Logs"])
+    tabs = st.tabs([
+        "Portfolio", "Dashboard", "Daily", "Monthly Allocation", "Performance", "Risk", "Drawdowns", "Trading Costs", "Rebalance", "Selection", "Logs"
+    ])
 
-    # Dashboard‑Tab ------------------------------------------------------
+    # Portfolio ---------------------------------------------------------
     with tabs[0]:
-        st.subheader("🔍 KPI‑Übersicht")
-        if not engine.performance_metrics.empty:
-            st.dataframe(engine.performance_metrics, hide_index=True, use_container_width=True)
-        if not engine.monthly_performance.empty:
-            st.subheader("📆 Monatliche Performance (%)")
-            st.bar_chart(engine.monthly_performance.set_index("Date")["Monthly PnL (%)"])
-
-    # Portfolio‑Chart ----------------------------------------------------
-    with tabs[1]:
         st.subheader("📈 Portfolio‑Verlauf")
         if not engine.portfolio_value.empty:
             st.line_chart(engine.portfolio_value)
 
-    # Daily‑Detail -------------------------------------------------------
+    # Dashboard / KPI ---------------------------------------------------
+    with tabs[1]:
+        st.subheader("🔍 KPI‑Übersicht")
+        if not engine.performance_metrics.empty:
+            st.dataframe(engine.performance_metrics, hide_index=True, use_container_width=True)
+
+    # Daily -------------------------------------------------------------
     with tabs[2]:
-        st.subheader("📅 Daily Portfolio Details")
         if not engine.daily_df.empty:
+            st.subheader("📅 Daily Portfolio Details")
             st.dataframe(engine.daily_df, use_container_width=True)
 
-    # Monthly Allocation -------------------------------------------------
+    # Monthly Allocation ------------------------------------------------
     with tabs[3]:
-        st.subheader("📊 Monthly Allocation Summary")
         if not engine.monthly_allocations.empty:
+            st.subheader("📊 Monthly Allocation Summary")
             st.dataframe(engine.monthly_allocations, use_container_width=True)
 
-    # Logs ---------------------------------------------------------------
+    # Performance (Monthly PnL) ----------------------------------------
     with tabs[4]:
+        if not engine.monthly_performance.empty:
+            st.subheader("📆 Monatliche Performance (%)")
+            st.bar_chart(engine.monthly_performance.set_index("Date")["Monthly PnL (%)"])
+
+    # Risk Sheet --------------------------------------------------------
+    with tabs[5]:
+        st.subheader("⚠️ Risiko‑Kennzahlen")
+        try:
+            risk_df = pd.read_excel(tmp_path, sheet_name="Risiko")
+            st.dataframe(risk_df, use_container_width=True)
+        except Exception:
+            st.info("Risk‑Sheet nicht verfügbar.")
+
+    # Drawdowns ---------------------------------------------------------
+    with tabs[6]:
+        st.subheader("📉 Drawdowns")
+        try:
+            dd_df = pd.read_excel(tmp_path, sheet_name="Drawdowns")
+            st.dataframe(dd_df, use_container_width=True)
+        except Exception:
+            st.info("Drawdown‑Sheet nicht verfügbar.")
+
+    # Trading Costs -----------------------------------------------------
+    with tabs[7]:
+        st.subheader("💸 Trading‑Kosten")
+        try:
+            tc_df = pd.read_excel(tmp_path, sheet_name="Trading Costs Summary")
+            st.dataframe(tc_df, use_container_width=True)
+        except Exception:
+            st.info("Trading‑Kosten‑Sheet nicht verfügbar.")
+
+    # Rebalance ---------------------------------------------------------
+    with tabs[8]:
+        try:
+            reb_df = pd.read_excel(tmp_path, sheet_name="Rebalance Analysis")
+            st.subheader("🔁 Rebalance‑Analyse")
+            st.dataframe(reb_df, use_container_width=True)
+        except Exception:
+            st.info("Rebalance‑Sheet nicht verfügbar.")
+
+    # Selection Details -------------------------------------------------
+    with tabs[9]:
+        if engine.selection_details:
+            st.subheader("🔍 Selection Details")
+            sel_df = pd.DataFrame(engine.selection_details)
+            st.dataframe(sel_df, use_container_width=True)
+
+    # Logs --------------------------------------------------------------
+    with tabs[10]:
         st.subheader("🪵 Run‑Logs")
         if engine.log_lines:
             st.text("\n".join(engine.log_lines))
 
-    # Excel‑Download -----------------------------------------------------
+    # Excel‑Download ----------------------------------------------------
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = os.path.join(tmp_dir, "AlphaMachine_Report.xlsx")
         export_results_to_excel(engine, tmp_path)
