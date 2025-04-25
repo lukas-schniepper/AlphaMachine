@@ -14,6 +14,11 @@ from AlphaMachine_core.config import (
     ENABLE_TRADING_COSTS as CFG_ENABLE_TC,
     FIXED_COST_PER_TRADE as CFG_FIXED_COST,
     VARIABLE_COST_PCT as CFG_VAR_COST,
+    BACKTEST_WINDOW_DAYS as CFG_WINDOW,
+    OPTIMIZATION_MODE as CFG_OPT_MODE,
+    MIN_WEIGHT as CFG_MIN_W,
+    MAX_WEIGHT as CFG_MAX_W,
+    FORCE_EQUAL_WEIGHT as CFG_FORCE_EQ,
 )
 
 # ------------------------------------------------------------
@@ -49,10 +54,20 @@ start_balance     = st.sidebar.number_input("Startkapital", 10_000, 1_000_000, 1
 num_stocks        = st.sidebar.slider("Aktien pro Portfolio", 5, 50, 20)
 opt_method        = st.sidebar.selectbox("Optimierer", ["ledoit-wolf", "minvar", "hrp"], index=["ledoit-wolf","minvar","hrp"].index(CFG_OPT_METHOD))
 cov_estimator     = st.sidebar.selectbox("Kovarianzschätzer", ["ledoit-wolf", "constant-corr", "factor-model"], index=["ledoit-wolf","constant-corr","factor-model"].index(CFG_COV_EST))
+opt_mode          = st.sidebar.selectbox("Optimierungsmodus", ["select-then-optimize", "optimize-subset"], index=["select-then-optimize","optimize-subset"].index(CFG_OPT_MODE))
+
 rebalance_freq    = st.sidebar.selectbox("Rebalance", ["weekly", "monthly", "custom"], index=["weekly","monthly","custom"].index(CFG_REBAL_FREQ))
 custom_months     = 1
 if rebalance_freq == "custom":
     custom_months = st.sidebar.slider("Monate zwischen Rebalances", 1, 12, CFG_CUSTOM_REBAL)
+
+# Lookback‑Fenster
+window_days = st.sidebar.slider("Lookback Days", 50, 500, CFG_WINDOW, 10)
+
+# Gewichtslimits
+min_w = st.sidebar.slider("Min Weight (%)", 0.0, 5.0, float(CFG_MIN_W*100), 0.5) / 100.0
+max_w = st.sidebar.slider("Max Weight (%)", 5.0, 50.0, float(CFG_MAX_W*100), 1.0) / 100.0
+force_eq = st.sidebar.checkbox("Force Equal Weight", CFG_FORCE_EQ)
 
 # Trading‑Kosten
 st.sidebar.subheader("Trading‑Kosten")
@@ -91,6 +106,11 @@ if run_btn and uploaded:
                 cov_estimator=cov_estimator,
                 rebalance_frequency=rebalance_freq,
                 custom_rebalance_months=custom_months,
+                window_days=window_days,
+                optimization_mode=opt_mode,
+                min_weight=min_w,
+                max_weight=max_w,
+                force_equal_weight=force_eq,
                 enable_trading_costs=enable_tc,
                 fixed_cost_per_trade=fixed_cost,
                 variable_cost_pct=var_cost,
