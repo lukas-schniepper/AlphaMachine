@@ -34,6 +34,7 @@ pwd = st.sidebar.text_input("Passwort", type="password")
 if pwd != st.secrets["APP_PW"]:
     st.warning("🔒 Bitte korrektes Passwort eingeben.")
     st.stop()
+    
 
 # -----------------------------------------------------------------------------
 # Navigation (Backtester | Data Mgmt)
