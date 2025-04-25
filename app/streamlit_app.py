@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import io
 import datetime as dt
+import tempfile
+import os
 
 from AlphaMachine_core.engine import SharpeBacktestEngine
 from AlphaMachine_core.reporting_no_sparklines import export_results_to_excel
@@ -94,13 +96,15 @@ if run_btn and uploaded:
     # ------------------------------------------------------------------------
     # Excel‑Download
     # ------------------------------------------------------------------------
-    buf = io.BytesIO()
-    export_results_to_excel(engine, buf)
-    st.download_button(
-        "📥 Excel‑Report herunterladen",
-        data=buf.getvalue(),
-        file_name=f"AlphaMachine_{dt.date.today()}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-else:
-    st.info("Lade eine CSV hoch, wähle Parameter und starte den Backtest.")
+    # Excel-Download
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = os.path.join(tmp_dir, "AlphaMachine_Report.xlsx")
+        export_results_to_excel(engine, tmp_path)
+
+        with open(tmp_path, "rb") as f:
+            st.download_button(
+                "📥 Excel-Report",
+                f.read(),
+                file_name=f"AlphaMachine_{dt.date.today()}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
