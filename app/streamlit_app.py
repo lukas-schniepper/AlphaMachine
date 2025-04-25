@@ -114,7 +114,6 @@ if run_btn and uploaded:
                 fixed_cost_per_trade=fixed_cost,
                 variable_cost_pct=var_cost,
             )
-            # Optimierungsmodus nachträglich setzen (init kennt den Param nicht)
             engine.optimization_mode = opt_mode
 
             progress.progress(50, text="Rebalancing & Performance…")
@@ -126,21 +125,46 @@ if run_btn and uploaded:
 
     st.success("Backtest fertig ✅")
 
-    # KPI‑Kacheln
-    if not engine.performance_metrics.empty:
-        kpi = engine.performance_metrics.set_index("Metric")["Value"]
-        cols = st.columns(4)
-        cols[0].metric("CAGR", kpi.get("CAGR (%)", "n/a"))
-        cols[1].metric("Sharpe", kpi.get("Sharpe Ratio", "n/a"))
-        cols[2].metric("Max DD", kpi.get("Max Drawdown (%)", "n/a"))
-        cols[3].metric("Kosten", kpi.get("Trading Costs (% of Initial)", "n/a"))
+    # --------------------------------------------------------
+    # Tabs für Auswertungen
+    # --------------------------------------------------------
 
-    # Portfolio‑Chart
-    if not engine.portfolio_value.empty:
+    tabs = st.tabs(["Dashboard", "Portfolio", "Daily", "Monthly Allo", "Logs"])
+
+    # Dashboard‑Tab ------------------------------------------------------
+    with tabs[0]:
+        st.subheader("🔍 KPI‑Übersicht")
+        if not engine.performance_metrics.empty:
+            st.dataframe(engine.performance_metrics, hide_index=True, use_container_width=True)
+        if not engine.monthly_performance.empty:
+            st.subheader("📆 Monatliche Performance (%)")
+            st.bar_chart(engine.monthly_performance.set_index("Date")["Monthly PnL (%)"])
+
+    # Portfolio‑Chart ----------------------------------------------------
+    with tabs[1]:
         st.subheader("📈 Portfolio‑Verlauf")
-        st.line_chart(engine.portfolio_value)
+        if not engine.portfolio_value.empty:
+            st.line_chart(engine.portfolio_value)
 
-    # Excel‑Download (Temp‑File, um Korrupte‑Warnung zu vermeiden)
+    # Daily‑Detail -------------------------------------------------------
+    with tabs[2]:
+        st.subheader("📅 Daily Portfolio Details")
+        if not engine.daily_df.empty:
+            st.dataframe(engine.daily_df, use_container_width=True)
+
+    # Monthly Allocation -------------------------------------------------
+    with tabs[3]:
+        st.subheader("📊 Monthly Allocation Summary")
+        if not engine.monthly_allocations.empty:
+            st.dataframe(engine.monthly_allocations, use_container_width=True)
+
+    # Logs ---------------------------------------------------------------
+    with tabs[4]:
+        st.subheader("🪵 Run‑Logs")
+        if engine.log_lines:
+            st.text("\n".join(engine.log_lines))
+
+    # Excel‑Download -----------------------------------------------------
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = os.path.join(tmp_dir, "AlphaMachine_Report.xlsx")
         export_results_to_excel(engine, tmp_path)
