@@ -107,7 +107,6 @@ if run_btn and uploaded:
                 rebalance_frequency=rebalance_freq,
                 custom_rebalance_months=custom_months,
                 window_days=window_days,
-                optimization_mode=opt_mode,
                 min_weight=min_w,
                 max_weight=max_w,
                 force_equal_weight=force_eq,
@@ -115,6 +114,9 @@ if run_btn and uploaded:
                 fixed_cost_per_trade=fixed_cost,
                 variable_cost_pct=var_cost,
             )
+            # Optimierungsmodus nachträglich setzen (init kennt den Param nicht)
+            engine.optimization_mode = opt_mode
+
             progress.progress(50, text="Rebalancing & Performance…")
             engine.run_with_next_month_allocation()
             progress.progress(100, text="Fertig!")
