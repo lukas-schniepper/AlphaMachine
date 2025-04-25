@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import datetime as dt
 import tempfile, os
+from dateutil.relativedelta import relativedelta
 
 from AlphaMachine_core.engine import SharpeBacktestEngine
 from AlphaMachine_core.reporting_no_sparklines import export_results_to_excel
@@ -230,46 +231,66 @@ def show_data_ui():
 
     dm = StockDataManager(base_folder=os.path.expanduser("~/data_alpha"))
 
-    # Ticker-CSV hochladen (optional)
-    csv = st.file_uploader("Ticker-CSV (`ticker,start,end`)", type="csv")
-    if csv is not None:
-        df_csv = pd.read_csv(csv)
-        st.dataframe(df_csv)
+    st.subheader("Ticker für Monat definieren")
+    # 1) Textarea für die Ticker-Liste
+    tickers_text = st.text_area(
+        "Tickers (eine pro Zeile)",
+        placeholder="z.B. AAPL\nMSFT\nGOOGL",
+        height=120
+    )
 
-    col_a, col_b = st.columns(2)
-    if col_a.button("➕ Ticker hinzufügen"):
-        if csv is None:
-            st.warning("Bitte eine Ticker-CSV hochladen.")
+    # 2) Monat wählen (Date-Input, Tag wird ignoriert)
+    month_dt = st.date_input(
+        "Monat auswählen",
+        value=dt.date.today().replace(day=1)
+    )
+    # automatisch erster Tag des Monats
+    period_start = month_dt.replace(day=1)
+    # letzter Tag des Monats
+    period_end   = (pd.to_datetime(period_start) + pd.offsets.MonthEnd(1)).date()
+
+    st.write(f"Zeitraum: **{period_start}** bis **{period_end}**")
+
+    # 3) Quelle (Source) auswählen
+    source = st.selectbox(
+        "Quelle",
+        ["SeekingAlpha", "TipRanks", "Topweights"]
+    )
+
+    # 4) Ticker hinzufügen
+    if st.button("➕ Ticker hinzufügen"):
+        tickers = [t.strip() for t in tickers_text.splitlines() if t.strip()]
+        if not tickers:
+            st.warning("Bitte mindestens einen Ticker eingeben.")
         else:
-            for _, row in df_csv.iterrows():
-                dm.add_tickers_for_period(
-                    [row["ticker"]],
-                    row["start"],
-                    row["end"],
-                    source_name="upload"
-                )
-            st.success("Ticker hinzugefügt.")
+            added = dm.add_tickers_for_period(
+                tickers,
+                period_start_date=period_start.strftime("%Y-%m-%d"),
+                period_end_date  =period_end.strftime("%Y-%m-%d"),
+                source_name      =source
+            )
+            st.success(f"{len(added)} Ticker hinzugefügt.")
 
-    if col_b.button("🔄 Preise updaten"):
+    st.markdown("---")
+    st.subheader("Preisdaten aktualisieren")
+    if st.button("🔄 Preise updaten"):
         with st.spinner("Lade Preise…"):
-            dm.update_ticker_data()
+            updated = dm.update_ticker_data()
+        st.success(f"{len(updated)} Ticker aktualisiert.")
 
-    # Tabellen anzeigen
-    info_file   = os.path.expanduser("~/data_alpha/ticker_info.csv")
-    periods_file= os.path.expanduser("~/data_alpha/ticker_periods.csv")
+    st.markdown("---")
+    # 5) Kontroll-CSV: ticker_info.csv
+    info_file    = os.path.expanduser("~/data_alpha/ticker_info.csv")
+    periods_file = os.path.expanduser("~/data_alpha/ticker_periods.csv")
 
     if os.path.exists(info_file):
         st.subheader("Ticker Info")
-        st.dataframe(pd.read_csv(info_file))
+        st.dataframe(pd.read_csv(info_file), use_container_width=True)
+    else:
+        st.info("Keine ticker_info.csv gefunden.")
 
     if os.path.exists(periods_file):
         st.subheader("Ticker Periods")
-        st.dataframe(pd.read_csv(periods_file))
-
-# -----------------------------------------------------------------------------
-# Router
-# -----------------------------------------------------------------------------
-if page == "Backtester":
-    show_backtester_ui()
-else:
-    show_data_ui()
+        st.dataframe(pd.read_csv(periods_file), use_container_width=True)
+    else:
+        st.info("Keine ticker_periods.csv gefunden.")
