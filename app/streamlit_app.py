@@ -6,6 +6,8 @@ import datetime as dt
 from AlphaMachine_core.engine import SharpeBacktestEngine
 from AlphaMachine_core.reporting_no_sparklines import export_results_to_excel
 
+st.set_page_config("AlphaMachine Backtester", layout="wide")
+
 # --- einfacher Passwort-Gate ---------------------------------
 pwd = st.sidebar.text_input("Passwort", type="password")
 if pwd != st.secrets["APP_PW"]:
@@ -15,8 +17,6 @@ if pwd != st.secrets["APP_PW"]:
 # ----------------------------------------------------------------------------
 # Page‑Config & Caching
 # ----------------------------------------------------------------------------
-
-st.set_page_config("AlphaMachine Backtester", layout="wide")
 
 @st.cache_data(show_spinner="📂 CSV wird geladen…")
 def load_csv(file) -> pd.DataFrame:
