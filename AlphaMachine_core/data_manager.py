@@ -4,16 +4,13 @@ import numpy as np
 import time
 import os
 import datetime as dt
-from google.colab import drive
 
-# Mount Google Drive
-drive.mount('/content/drive')
 
 class StockDataManager:
     """
     Verbesserter Data Manager für Aktien-Backtests mit standardisierten CSV-Dateien
     """
-    def __init__(self, base_folder='/content/drive/MyDrive/Stocks/Data'):
+    def __init__(self, base_folder = os.path.expanduser("~/data_alpha")):
         self.base_folder = base_folder
         self.price_data_folder = os.path.join(base_folder, 'price_data')
         self.ticker_periods_file = os.path.join(base_folder, 'ticker_periods.csv')
