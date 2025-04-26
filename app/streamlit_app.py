@@ -24,7 +24,7 @@ from AlphaMachine_core.config import (
 # -----------------------------------------------------------------------------
 # 1) Page-Config
 # -----------------------------------------------------------------------------
-st.set_page_config("AlphaMachine Backtester", layout="wide")
+st.set_page_config("AlphaMachine", layout="wide")
 
 # -----------------------------------------------------------------------------
 # 2) Passwort-Gate
@@ -47,187 +47,225 @@ def load_csv(file):
     return pd.read_csv(file, index_col=0, parse_dates=True)
 
 # -----------------------------------------------------------------------------
-# === UI-Funktionen ===
+# === Backtester-UI ===
 # -----------------------------------------------------------------------------
 def show_backtester_ui():
-    """Alle Elemente für den Backtester."""
     st.sidebar.header("📊 Backtest-Parameter")
-    # (Hier alle Sidebar-Eingaben wie gehabt …)
-    uploaded          = st.sidebar.file_uploader("CSV-Preisdaten", type="csv")
-    start_balance     = st.sidebar.number_input("Startkapital", 10_000, 1_000_000, 100_000, 1_000)
-    num_stocks        = st.sidebar.slider("Aktien pro Portfolio", 5, 50, 20)
-    opt_method        = st.sidebar.selectbox(
-        "Optimierer", ["ledoit-wolf", "minvar", "hrp"],
+    uploaded = st.sidebar.file_uploader("CSV-Preisdaten", type="csv")
+    start_balance = st.sidebar.number_input("Startkapital", 10_000, 1_000_000, 100_000, 1_000)
+    num_stocks = st.sidebar.slider("Aktien pro Portfolio", 5, 50, 20)
+
+    opt_method = st.sidebar.selectbox(
+        "Optimierer", ["ledoit-wolf","minvar","hrp"],
         index=["ledoit-wolf","minvar","hrp"].index(CFG_OPT_METHOD)
     )
-    cov_estimator     = st.sidebar.selectbox(
-        "Kovarianzschätzer", ["ledoit-wolf", "constant-corr", "factor-model"],
+    cov_estimator = st.sidebar.selectbox(
+        "Kovarianzschätzer", ["ledoit-wolf","constant-corr","factor-model"],
         index=["ledoit-wolf","constant-corr","factor-model"].index(CFG_COV_EST)
     )
-    opt_mode          = st.sidebar.selectbox(
-        "Optimierungsmodus", ["select-then-optimize", "optimize-subset"],
+    opt_mode = st.sidebar.selectbox(
+        "Optimierungsmodus", ["select-then-optimize","optimize-subset"],
         index=["select-then-optimize","optimize-subset"].index(CFG_OPT_MODE)
     )
-    rebalance_freq    = st.sidebar.selectbox(
-        "Rebalance", ["weekly", "monthly", "custom"],
+
+    rebalance_freq = st.sidebar.selectbox(
+        "Rebalance", ["weekly","monthly","custom"],
         index=["weekly","monthly","custom"].index(CFG_REBAL_FREQ)
     )
-    custom_months     = (
-        st.sidebar.slider("Monate zwischen Rebalances", 1, 12, CFG_CUSTOM_REBAL)
-        if rebalance_freq == "custom"
-        else 1
+    custom_months = (
+        st.sidebar.slider("Monate zwischen Rebalances",1,12,CFG_CUSTOM_REBAL)
+        if rebalance_freq=="custom" else 1
     )
-    window_days       = st.sidebar.slider("Lookback Days", 50, 500, CFG_WINDOW, 10)
-    min_w             = st.sidebar.slider("Min Weight (%)", 0.0, 5.0, float(CFG_MIN_W*100), 0.5) / 100
-    max_w             = st.sidebar.slider("Max Weight (%)", 5.0, 50.0, float(CFG_MAX_W*100), 1.0) / 100
-    force_eq          = st.sidebar.checkbox("Force Equal Weight", CFG_FORCE_EQ)
+    window_days = st.sidebar.slider("Lookback Days",50,500,CFG_WINDOW,10)
+
+    min_w = st.sidebar.slider("Min Weight (%)",0.0,5.0,float(CFG_MIN_W*100),0.5)/100.0
+    max_w = st.sidebar.slider("Max Weight (%)",5.0,50.0,float(CFG_MAX_W*100),1.0)/100.0
+    force_eq = st.sidebar.checkbox("Force Equal Weight", CFG_FORCE_EQ)
+
     st.sidebar.subheader("Trading-Kosten")
-    enable_tc         = st.sidebar.checkbox("Kosten aktiv", CFG_ENABLE_TC)
-    fixed_cost        = st.sidebar.number_input("Fixe Kosten pro Trade", 0.0, 100.0, float(CFG_FIXED_COST))
-    var_cost          = st.sidebar.number_input("Variable Kosten (%)", 0.0, 1.0, float(CFG_VAR_COST*100)) / 100
-    run_btn           = st.sidebar.button("Backtest starten 🚀")
+    enable_tc = st.sidebar.checkbox("Kosten aktiv", CFG_ENABLE_TC)
+    fixed_cost = st.sidebar.number_input("Fixe Kosten pro Trade",0.0,100.0,float(CFG_FIXED_COST))
+    var_cost = st.sidebar.number_input("Variable Kosten (%)",0.0,1.0,float(CFG_VAR_COST*100))/100.0
+
+    run_btn = st.sidebar.button("Backtest starten 🚀")
 
     # Early exit
     if run_btn and uploaded is None:
         st.warning("Bitte zuerst eine CSV-Datei hochladen.")
         st.stop()
 
-    # Run backtest
     if run_btn and uploaded:
-        with st.spinner(f"📈 Backtest für {uploaded.name} läuft…"):
+        with st.spinner(f"📈 Backtest läuft…"):
             price_df = load_csv(uploaded)
             if price_df.empty:
-                st.error("Die hochgeladene CSV enthält keine Daten!")
+                st.error("Hochgeladene CSV enthält keine Daten!")
                 st.stop()
+
             progress = st.progress(0, text="Starte Optimierer…")
             engine = SharpeBacktestEngine(
-                price_df,
-                start_balance,
-                num_stocks,
+                price_df, start_balance, num_stocks,
                 optimizer_method=opt_method,
                 cov_estimator=cov_estimator,
                 rebalance_frequency=rebalance_freq,
                 custom_rebalance_months=custom_months,
                 window_days=window_days,
-                min_weight=min_w,
-                max_weight=max_w,
+                min_weight=min_w, max_weight=max_w,
                 force_equal_weight=force_eq,
                 enable_trading_costs=enable_tc,
                 fixed_cost_per_trade=fixed_cost,
                 variable_cost_pct=var_cost,
             )
             engine.optimization_mode = opt_mode
-            progress.progress(50, text="Rebalancing & Performance…")
+            progress.progress(50, text="Rebalancing…")
             engine.run_with_next_month_allocation()
             progress.progress(100, text="Fertig!")
+
         st.success("Backtest fertig ✅")
 
-        # Ergebnis-Tabs
+        # Tabs
         tabs = st.tabs([
-            "Portfolio", "Dashboard", "Daily", "Monthly Allocation",
-            "Performance", "Risk", "Drawdowns", "Trading Costs",
-            "Rebalance", "Selection", "Logs"
+            "Portfolio","Dashboard","Daily","Monthly Allocation",
+            "Performance","Risk","Drawdowns","Trading Costs",
+            "Rebalance","Selection","Logs"
         ])
-        # … hier wie gehabt die Inhalte pro Tab …
 
-        # Excel-Download ganz unten
+        with tabs[0]:
+            st.subheader("📈 Portfolio-Verlauf")
+            if not engine.portfolio_value.empty:
+                st.line_chart(engine.portfolio_value)
+
+        with tabs[1]:
+            st.subheader("🔍 KPI-Übersicht")
+            if not engine.performance_metrics.empty:
+                st.dataframe(engine.performance_metrics, hide_index=True, use_container_width=True)
+
+        with tabs[2]:
+            st.subheader("📅 Daily Portfolio")
+            if not engine.daily_df.empty:
+                st.dataframe(engine.daily_df, use_container_width=True)
+
+        with tabs[3]:
+            st.subheader("📊 Monthly Allocation")
+            if not engine.monthly_allocations.empty:
+                st.dataframe(engine.monthly_allocations, use_container_width=True)
+
+        with tabs[4]:
+            st.subheader("📆 Monatliche Performance (%)")
+            if not engine.monthly_performance.empty:
+                st.bar_chart(
+                    engine.monthly_performance.set_index("Date")["Monthly PnL (%)"]
+                )
+
+        with tabs[5]:
+            st.subheader("⚠️ Risiko")
+            st.dataframe(engine.performance_metrics.loc[
+                engine.performance_metrics["Metric"].isin(
+                    ["Annual Volatility (%)","Sharpe Ratio","Max Drawdown (%)"]
+                )
+            ], use_container_width=True)
+
+        with tabs[6]:
+            st.subheader("📉 Drawdowns")
+            st.dataframe(engine.performance_metrics.loc[
+                engine.performance_metrics["Metric"]=="Max Drawdown (%)"
+            ], use_container_width=True)
+
+        with tabs[7]:
+            st.subheader("💸 Trading Costs")
+            st.dataframe(engine.performance_metrics.loc[
+                engine.performance_metrics["Metric"].isin(
+                    ["Total Trading Costs","Trading Costs (% of Initial)"]
+                )
+            ], use_container_width=True)
+
+        with tabs[8]:
+            st.subheader("🔁 Rebalance Analysis")
+            st.dataframe(pd.DataFrame(engine.selection_details), use_container_width=True)
+
+        with tabs[9]:
+            st.subheader("🔍 Selection Details")
+            st.dataframe(pd.DataFrame(engine.selection_details), use_container_width=True)
+
+        with tabs[10]:
+            st.subheader("🪵 Logs")
+            st.text("\n".join(engine.log_lines))
+
+        # Excel Download
         with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = os.path.join(tmp_dir, "AlphaMachine_Report.xlsx")
-            export_results_to_excel(engine, tmp_path)
-            with open(tmp_path, "rb") as f:
+            tmp_path = os.path.join(tmp_dir,"AlphaMachine_Report.xlsx")
+            export_results_to_excel(engine,tmp_path)
+            with open(tmp_path,"rb") as f:
                 st.download_button(
                     "📥 Excel-Report",
                     f.read(),
                     file_name=f"AlphaMachine_{dt.date.today()}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
-
     else:
-        st.info("Lade eine CSV hoch, wähle Parameter und starte den Backtest.")
+        st.info("Bitte einen Tab wählen und dann Backtest ausführen.")
 
+# -----------------------------------------------------------------------------
+# === Data-Management-UI ===
+# -----------------------------------------------------------------------------
 def show_data_ui():
     st.header("📂 Data Management")
-
     dm = StockDataManager(base_folder=os.path.expanduser("~/data_alpha"))
 
-    # Untermodus wählen
-    mode = st.radio("Modus", ["➕ Add/Update", "👁️ View/Delete"], index=0)
+    mode = st.radio("Modus", ["➕ Add/Update","👁️ View/Delete"], index=0)
 
-    # --- Modus 1: Add/Update --------------------------------------
     if mode == "➕ Add/Update":
-        st.subheader("Ticker für Monat definieren")
-        tickers_text = st.text_area(
-            "Tickers (eine pro Zeile)", placeholder="AAPL\nMSFT\nGOOGL", height=120
-        )
-        month_dt = st.date_input("Monat auswählen", value=dt.date.today().replace(day=1))
-        period_start = month_dt.replace(day=1)
-        period_end   = (pd.to_datetime(period_start) + pd.offsets.MonthEnd(1)).date()
-        st.write(f"Zeitraum: **{period_start}** bis **{period_end}**")
-
-        source = st.selectbox("Quelle", ["SeekingAlpha", "TipRanks", "Topweights"])
-
-        if st.button("➕ Ticker hinzufügen"):
-            tickers = [t.strip() for t in tickers_text.splitlines() if t.strip()]
-            if not tickers:
-                st.warning("Bitte mindestens einen Ticker eingeben.")
-            else:
-                added = dm.add_tickers_for_period(
-                    tickers,
-                    period_start_date=period_start.strftime("%Y-%m-%d"),
-                    period_end_date  =period_end.strftime("%Y-%m-%d"),
-                    source_name      =source
-                )
-                st.success(f"{len(added)} Ticker hinzugefügt.")
-
-        st.markdown("---")
+        st.subheader("➕ Ticker einfügen & Daten updaten")
+        tickers = st.text_area("Tickers (eine pro Zeile)", height=120)
+        month_dt = st.date_input("Monat wählen", value=dt.date.today().replace(day=1))
+        start = month_dt.replace(day=1)
+        end   = (pd.to_datetime(start)+pd.offsets.MonthEnd(1)).date()
+        st.write(f"Zeitraum: {start} bis {end}")
+        source = st.selectbox("Quelle", ["SeekingAlpha","TipRanks","Topweights"])
+        if st.button("➕ Hinzufügen"):
+            ts = [t.strip() for t in tickers.splitlines() if t.strip()]
+            added = dm.add_tickers_for_period(ts,start.strftime("%Y-%m-%d"),end.strftime("%Y-%m-%d"),source)
+            st.success(f"{len(added)} Ticker hinzugefügt.")
         if st.button("🔄 Preise updaten"):
-            with st.spinner("Lade Preise…"):
+            with st.spinner("Aktualisiere…"):
                 updated = dm.update_ticker_data()
             st.success(f"{len(updated)} Ticker aktualisiert.")
 
-    # --- Modus 2: View/Delete ------------------------------------
     else:
-        st.subheader("Daten anzeigen & löschen")
-
-        # Periods laden und Monat / Quelle filtern
-        periods_file = os.path.expanduser("~/data_alpha/ticker_periods.csv")
-        if not os.path.exists(periods_file):
-            st.info("Keine ticker_periods.csv gefunden.")
-            return
-
-        df_per = pd.read_csv(periods_file)
-        df_per["month"] = df_per["start_date"].str[:7]
-
-        month = st.selectbox("Monat", sorted(df_per["month"].unique()))
-        source = st.selectbox("Quelle", sorted(df_per["source"].unique()))
-
-        df_filt = df_per[(df_per["month"] == month) & (df_per["source"] == source)]
-        if df_filt.empty:
-            st.info("Keine Ticker für diese Auswahl.")
+        st.subheader("👁️ View/Delete")
+        per_file = os.path.expanduser("~/data_alpha/ticker_periods.csv")
+        if not os.path.exists(per_file):
+            st.info("Keine ticker_periods.csv vorhanden.")
         else:
-            st.dataframe(df_filt.drop(columns=["month"]), use_container_width=True)
-
-            to_delete = st.multiselect(
-                "Einträge zum Löschen (Index auswählen)",
-                df_filt.index.tolist(),
-                format_func=lambda i: f"{df_filt.at[i,'ticker']} ({df_filt.at[i,'start_date']})"
-            )
-            if st.button("🗑️ Ausgewählte löschen"):
-                df_new = df_per.drop(index=to_delete).drop(columns=["month"])
-                df_new.to_csv(periods_file, index=False)
-                st.success(f"{len(to_delete)} Einträge gelöscht.")
-                st.experimental_rerun()  # Tabelle neu laden
-
-        st.markdown("---")
-        # Ticker Info mit Spalten-Filter
+            dfp = pd.read_csv(per_file)
+            dfp["month"] = dfp["start_date"].str[:7]
+            month = st.selectbox("Monat", sorted(dfp["month"].unique()))
+            source = st.selectbox("Quelle", sorted(dfp["source"].unique()))
+            filt = dfp[(dfp["month"]==month)&(dfp["source"]==source)]
+            if filt.empty:
+                st.info("Keine Einträge.")
+            else:
+                st.dataframe(filt.drop(columns=["month"]), use_container_width=True)
+                to_del = st.multiselect("Löschen (Index)", filt.index.tolist(),
+                                        format_func=lambda i:f"{filt.at[i,'ticker']} ({filt.at[i,'start_date']})")
+                if st.button("🗑️ Löschen"):
+                    new = dfp.drop(index=to_del).drop(columns=["month"])
+                    new.to_csv(per_file,index=False)
+                    st.success(f"{len(to_del)} gelöscht.")
+                    st.experimental_rerun()
+        # Ticker Info mit Filter
         info_file = os.path.expanduser("~/data_alpha/ticker_info.csv")
         if os.path.exists(info_file):
-            st.subheader("Ticker Info (mit Filter)")
-            df_info = pd.read_csv(info_file)
-            col = st.selectbox("Filter-Spalte", df_info.columns.tolist())
-            vals = st.multiselect("Filter-Werte", sorted(df_info[col].dropna().unique()))
-            if vals:
-                df_info = df_info[df_info[col].isin(vals)]
-            st.dataframe(df_info, use_container_width=True)
-        else:
-            st.info("Keine ticker_info.csv gefunden.")
+            st.subheader("Ticker Info")
+            dfinfo = pd.read_csv(info_file)
+            col = st.selectbox("Filter-Spalte", dfinfo.columns.tolist())
+            vals=st.multiselect("Filter-Werte",sorted(dfinfo[col].dropna().unique()))
+            if vals: dfinfo=dfinfo[dfinfo[col].isin(vals)]
+            st.dataframe(dfinfo, use_container_width=True)
+
+# -----------------------------------------------------------------------------
+# 5) Router
+# -----------------------------------------------------------------------------
+if page == "Backtester":
+    show_backtester_ui()
+else:
+    show_data_ui()
