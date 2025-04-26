@@ -1,3 +1,6 @@
+from AlphaMachine_core.db import init_db
+init_db()
+
 import streamlit as st
 import pandas as pd
 import datetime as dt
@@ -46,9 +49,9 @@ page = st.sidebar.radio("🗂️ Seite wählen", ["Backtester", "Data Mgmt"], in
 def load_csv(file):
     return pd.read_csv(file, index_col=0, parse_dates=True)
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # === Backtester-UI ===
-# -----------------------------------------------------------------------------
+# =============================================================================
 def show_backtester_ui():
     st.sidebar.header("📊 Backtest-Parameter")
     uploaded = st.sidebar.file_uploader("CSV-Preisdaten", type="csv")
@@ -158,25 +161,15 @@ def show_backtester_ui():
 
         with tabs[5]:
             st.subheader("⚠️ Risiko")
-            st.dataframe(engine.performance_metrics.loc[
-                engine.performance_metrics["Metric"].isin(
-                    ["Annual Volatility (%)","Sharpe Ratio","Max Drawdown (%)"]
-                )
-            ], use_container_width=True)
+            st.dataframe(engine.performance_metrics, use_container_width=True)
 
         with tabs[6]:
             st.subheader("📉 Drawdowns")
-            st.dataframe(engine.performance_metrics.loc[
-                engine.performance_metrics["Metric"]=="Max Drawdown (%)"
-            ], use_container_width=True)
+            st.dataframe(engine.performance_metrics, use_container_width=True)
 
         with tabs[7]:
             st.subheader("💸 Trading Costs")
-            st.dataframe(engine.performance_metrics.loc[
-                engine.performance_metrics["Metric"].isin(
-                    ["Total Trading Costs","Trading Costs (% of Initial)"]
-                )
-            ], use_container_width=True)
+            st.dataframe(engine.performance_metrics, use_container_width=True)
 
         with tabs[8]:
             st.subheader("🔁 Rebalance Analysis")
@@ -204,12 +197,12 @@ def show_backtester_ui():
     else:
         st.info("Bitte einen Tab wählen und dann Backtest ausführen.")
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # === Data-Management-UI ===
-# -----------------------------------------------------------------------------
+# =============================================================================
 def show_data_ui():
     st.header("📂 Data Management")
-    dm = StockDataManager(base_folder=os.path.expanduser("~/data_alpha"))
+    dm = StockDataManager()
 
     mode = st.radio("Modus", ["➕ Add/Update","👁️ View/Delete"], index=0)
 
@@ -232,35 +225,32 @@ def show_data_ui():
 
     else:
         st.subheader("👁️ View/Delete")
-        per_file = os.path.expanduser("~/data_alpha/ticker_periods.csv")
-        if not os.path.exists(per_file):
-            st.info("Keine ticker_periods.csv vorhanden.")
+        month = st.selectbox("Monat", list({p.start_date.strftime('%Y-%m') for p in dm.get_periods('','')}))
+        source = st.selectbox("Quelle", list({p.source for p in dm.get_periods(month,'')}))
+        periods = dm.get_periods(month, source)
+        if not periods:
+            st.info("Keine Einträge.")
         else:
-            dfp = pd.read_csv(per_file)
-            dfp["month"] = dfp["start_date"].str[:7]
-            month = st.selectbox("Monat", sorted(dfp["month"].unique()))
-            source = st.selectbox("Quelle", sorted(dfp["source"].unique()))
-            filt = dfp[(dfp["month"]==month)&(dfp["source"]==source)]
-            if filt.empty:
-                st.info("Keine Einträge.")
-            else:
-                st.dataframe(filt.drop(columns=["month"]), use_container_width=True)
-                to_del = st.multiselect("Löschen (Index)", filt.index.tolist(),
-                                        format_func=lambda i:f"{filt.at[i,'ticker']} ({filt.at[i,'start_date']})")
-                if st.button("🗑️ Löschen"):
-                    new = dfp.drop(index=to_del).drop(columns=["month"])
-                    new.to_csv(per_file,index=False)
-                    st.success(f"{len(to_del)} gelöscht.")
-                    st.experimental_rerun()
-        # Ticker Info mit Filter
-        info_file = os.path.expanduser("~/data_alpha/ticker_info.csv")
-        if os.path.exists(info_file):
-            st.subheader("Ticker Info")
-            dfinfo = pd.read_csv(info_file)
-            col = st.selectbox("Filter-Spalte", dfinfo.columns.tolist())
-            vals=st.multiselect("Filter-Werte",sorted(dfinfo[col].dropna().unique()))
-            if vals: dfinfo=dfinfo[dfinfo[col].isin(vals)]
-            st.dataframe(dfinfo, use_container_width=True)
+            dfp = pd.DataFrame([vars(p) for p in periods])[['id','ticker','start_date','end_date','source']]
+            st.dataframe(dfp.set_index('id'), use_container_width=True)
+            to_del = st.multiselect("Zu löschen (ID)", dfp['id'].tolist())
+            if st.button("🗑️ Löschen"):
+                for pid in to_del:
+                    p = session.get(TickerPeriod, pid)
+                    session.delete(p)
+                session.commit()
+                st.success(f"{len(to_del)} Einträge gelöscht.")
+                st.experimental_rerun()
+
+        st.markdown("---")
+        st.subheader("Ticker Info")
+        info = dm.get_ticker_info()
+        dfi = pd.DataFrame([vars(i) for i in info])[['id','ticker','sector','currency','actual_start_date','actual_end_date','last_update']]
+        col = st.selectbox("Filter-Spalte", dfi.columns.tolist())
+        vals = st.multiselect("Filter-Werte", sorted(dfi[col].dropna().unique()))
+        if vals:
+            dfi = dfi[dfi[col].isin(vals)]
+        st.dataframe(dfi.set_index('id'), use_container_width=True)
 
 # -----------------------------------------------------------------------------
 # 5) Router
