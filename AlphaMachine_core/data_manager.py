@@ -8,7 +8,7 @@ from AlphaMachine_core.config import DATABASE_URL
 from AlphaMachine_core.models import TickerPeriod, TickerInfo, PriceData
 from AlphaMachine_core.db import init_db, get_session
 
-+init_db()
+init_db()
 
 # DB-Engine & Session
 engine = create_engine(DATABASE_URL, echo=False)
