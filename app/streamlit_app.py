@@ -1,6 +1,3 @@
-from AlphaMachine_core.db import init_db
-init_db()
-
 import streamlit as st
 import pandas as pd
 import datetime as dt
@@ -201,6 +198,11 @@ def show_backtester_ui():
 # === Data-Management-UI ===
 # =============================================================================
 def show_data_ui():
+
+    from AlphaMachine_core.db import init_db
+    # initialisiert nur hier die Tabellen (und fängt Fehler)
+    init_db()
+    
     st.header("📂 Data Management")
     dm = StockDataManager()
 
