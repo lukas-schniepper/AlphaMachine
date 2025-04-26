@@ -6,9 +6,7 @@ import pandas as pd
 from sqlmodel import SQLModel, Session, create_engine, select
 from AlphaMachine_core.config import DATABASE_URL
 from AlphaMachine_core.models import TickerPeriod, TickerInfo, PriceData
-from AlphaMachine_core.db import init_db, get_session
-
-init_db()
+from AlphaMachine_core.db import get_session
 
 # DB-Engine & Session
 engine = create_engine(DATABASE_URL, echo=False)
