@@ -146,55 +146,88 @@ def show_backtester_ui():
         st.info("Lade eine CSV hoch, wähle Parameter und starte den Backtest.")
 
 def show_data_ui():
-    """Minimaler Data-Manager."""
     st.header("📂 Data Management")
+
     dm = StockDataManager(base_folder=os.path.expanduser("~/data_alpha"))
 
-    tickers_text = st.text_area(
-        "Tickers (eine pro Zeile)", placeholder="AAPL\nMSFT\nGOOGL", height=120
-    )
-    month_dt = st.date_input(
-        "Monat auswählen", value=dt.date.today().replace(day=1)
-    )
-    period_start = month_dt.replace(day=1)
-    period_end   = (pd.to_datetime(period_start) + pd.offsets.MonthEnd(1)).date()
-    st.write(f"Zeitraum: **{period_start}** bis **{period_end}**")
+    # Untermodus wählen
+    mode = st.radio("Modus", ["➕ Add/Update", "👁️ View/Delete"], index=0)
 
-    source = st.selectbox("Quelle", ["SeekingAlpha", "TipRanks", "Topweights"])
+    # --- Modus 1: Add/Update --------------------------------------
+    if mode == "➕ Add/Update":
+        st.subheader("Ticker für Monat definieren")
+        tickers_text = st.text_area(
+            "Tickers (eine pro Zeile)", placeholder="AAPL\nMSFT\nGOOGL", height=120
+        )
+        month_dt = st.date_input("Monat auswählen", value=dt.date.today().replace(day=1))
+        period_start = month_dt.replace(day=1)
+        period_end   = (pd.to_datetime(period_start) + pd.offsets.MonthEnd(1)).date()
+        st.write(f"Zeitraum: **{period_start}** bis **{period_end}**")
 
-    if st.button("➕ Ticker hinzufügen"):
-        tickers = [t.strip() for t in tickers_text.splitlines() if t.strip()]
-        if not tickers:
-            st.warning("Bitte mindestens einen Ticker eingeben.")
+        source = st.selectbox("Quelle", ["SeekingAlpha", "TipRanks", "Topweights"])
+
+        if st.button("➕ Ticker hinzufügen"):
+            tickers = [t.strip() for t in tickers_text.splitlines() if t.strip()]
+            if not tickers:
+                st.warning("Bitte mindestens einen Ticker eingeben.")
+            else:
+                added = dm.add_tickers_for_period(
+                    tickers,
+                    period_start_date=period_start.strftime("%Y-%m-%d"),
+                    period_end_date  =period_end.strftime("%Y-%m-%d"),
+                    source_name      =source
+                )
+                st.success(f"{len(added)} Ticker hinzugefügt.")
+
+        st.markdown("---")
+        if st.button("🔄 Preise updaten"):
+            with st.spinner("Lade Preise…"):
+                updated = dm.update_ticker_data()
+            st.success(f"{len(updated)} Ticker aktualisiert.")
+
+    # --- Modus 2: View/Delete ------------------------------------
+    else:
+        st.subheader("Daten anzeigen & löschen")
+
+        # Periods laden und Monat / Quelle filtern
+        periods_file = os.path.expanduser("~/data_alpha/ticker_periods.csv")
+        if not os.path.exists(periods_file):
+            st.info("Keine ticker_periods.csv gefunden.")
+            return
+
+        df_per = pd.read_csv(periods_file)
+        df_per["month"] = df_per["start_date"].str[:7]
+
+        month = st.selectbox("Monat", sorted(df_per["month"].unique()))
+        source = st.selectbox("Quelle", sorted(df_per["source"].unique()))
+
+        df_filt = df_per[(df_per["month"] == month) & (df_per["source"] == source)]
+        if df_filt.empty:
+            st.info("Keine Ticker für diese Auswahl.")
         else:
-            added = dm.add_tickers_for_period(
-                tickers,
-                period_start_date=period_start.strftime("%Y-%m-%d"),
-                period_end_date=period_end.strftime("%Y-%m-%d"),
-                source_name=source
+            st.dataframe(df_filt.drop(columns=["month"]), use_container_width=True)
+
+            to_delete = st.multiselect(
+                "Einträge zum Löschen (Index auswählen)",
+                df_filt.index.tolist(),
+                format_func=lambda i: f"{df_filt.at[i,'ticker']} ({df_filt.at[i,'start_date']})"
             )
-            st.success(f"{len(added)} Ticker hinzugefügt.")
+            if st.button("🗑️ Ausgewählte löschen"):
+                df_new = df_per.drop(index=to_delete).drop(columns=["month"])
+                df_new.to_csv(periods_file, index=False)
+                st.success(f"{len(to_delete)} Einträge gelöscht.")
+                st.experimental_rerun()  # Tabelle neu laden
 
-    st.markdown("---")
-    if st.button("🔄 Preise updaten"):
-        with st.spinner("Lade Preise…"):
-            updated = dm.update_ticker_data()
-        st.success(f"{len(updated)} Ticker aktualisiert.")
-
-    # Kontroll-CSV anzeigen
-    info_file    = os.path.expanduser("~/data_alpha/ticker_info.csv")
-    periods_file = os.path.expanduser("~/data_alpha/ticker_periods.csv")
-    if os.path.exists(info_file):
-        st.subheader("Ticker Info")
-        st.dataframe(pd.read_csv(info_file), use_container_width=True)
-    if os.path.exists(periods_file):
-        st.subheader("Ticker Periods")
-        st.dataframe(pd.read_csv(periods_file), use_container_width=True)
-
-# -----------------------------------------------------------------------------
-# 5) Router: Funktion je nach Auswahl aufrufen
-# -----------------------------------------------------------------------------
-if page == "Backtester":
-    show_backtester_ui()
-else:
-    show_data_ui()
+        st.markdown("---")
+        # Ticker Info mit Spalten-Filter
+        info_file = os.path.expanduser("~/data_alpha/ticker_info.csv")
+        if os.path.exists(info_file):
+            st.subheader("Ticker Info (mit Filter)")
+            df_info = pd.read_csv(info_file)
+            col = st.selectbox("Filter-Spalte", df_info.columns.tolist())
+            vals = st.multiselect("Filter-Werte", sorted(df_info[col].dropna().unique()))
+            if vals:
+                df_info = df_info[df_info[col].isin(vals)]
+            st.dataframe(df_info, use_container_width=True)
+        else:
+            st.info("Keine ticker_info.csv gefunden.")
