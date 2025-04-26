@@ -1,4 +1,7 @@
 # config.py – zentrale Parameterdatei für den Backtest
+import os
+
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # === Allgemeine Backtest-Einstellungen ===
 START_BALANCE = 100_000

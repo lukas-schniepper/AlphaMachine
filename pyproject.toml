@@ -12,7 +12,7 @@ packages = [
 # --- Abhängigkeiten ----------------------------------------------------
 [tool.poetry.dependencies]
 python = "^3.10"
-streamlit = "^1.44"
+streamlit = "^1.44.1"
 pandas = "^2.2"
 numpy = "^2.2"
 scipy = "^1.15"
