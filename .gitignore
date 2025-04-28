@@ -2,4 +2,4 @@
 __pycache__/
 *.py[cod]
 # Streamlit secrets
-.streamlit/secrets.toml
+.streamlit/secrets.toml.streamlit/secrets.toml
