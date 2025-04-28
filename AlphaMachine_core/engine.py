@@ -36,6 +36,8 @@ class SharpeBacktestEngine:
         price_data,
         start_balance,
         num_stocks,
+        start_month: str, 
+        universe_mode: str = "static",
         optimize_weights=None,
         optimizer_method=None,
         cov_estimator=None,
@@ -88,6 +90,8 @@ class SharpeBacktestEngine:
         self.fixed_cost_per_trade = fixed_cost_per_trade
         self.variable_cost_pct = variable_cost_pct
         self.total_trading_costs = 0.0
+        self.universe_mode = universe_mode.lower()
+        self.start_month = pd.Period(start_month, "M")
 
     def _get_valid_tickers(self, threshold=0.95):
         full_range = pd.date_range(
@@ -159,7 +163,24 @@ class SharpeBacktestEngine:
         optimizer_method="ledoit-wolf",
         force_equal_weight=False,
     ):
+
+        # --- apply static universe if requested ----------------
+        if self.universe_mode == "static":
+            # find tickers present in the start_month (at least one price)
+            mask = self.price_data.index.to_period("M") == self.start_month
+            tickers_at_start = (
+                self.price_data.loc[mask]
+                .dropna(axis=1, how="all")
+                .columns
+                .tolist()
+            )
+            # permanently restrict price_data to that static list
+            self.price_data = self.price_data[tickers_at_start]
+
+        # now compute returns on the (possibly filtered) data
         returns = self.price_data.pct_change().dropna()
+
+
         rebalance_schedule = build_rebalance_schedule(
             self.price_data,
             frequency=self.rebalance_freq,

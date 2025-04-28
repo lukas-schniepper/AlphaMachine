@@ -107,6 +107,7 @@ class StockDataManager:
                 session.add_all(objs)
                 session.commit()
 
+            print(f"🚧 Calling _update_ticker_info for {ticker}")
             self._update_ticker_info(ticker)
             updated.append(ticker)
             time.sleep(0.2)
@@ -114,6 +115,7 @@ class StockDataManager:
         return updated
 
     def _update_ticker_info(self, ticker: str) -> bool:
+        print(f"🚧 Entering _update_ticker_info for {ticker}")
         try:
             info = yf.Ticker(ticker).info
             with get_session() as session:
@@ -203,3 +205,23 @@ class StockDataManager:
                 session.commit()
                 return True
         return False
+
+    def get_periods_distinct_months(self) -> list[str]:
+        """Gibt alle Monate zurück, in denen es TickerPeriod-Einträge gibt."""
+        with get_session() as session:
+            rows = session.exec(
+                select(func.to_char(TickerPeriod.start_date, 'YYYY-MM')).distinct()
+            ).all()
+        return rows
+
+    def get_tickers_for(self, month: str, sources: list[str]) -> list[str]:
+        """Liefert alle Ticker für den angegebenen Monat und die Quellen."""
+        with get_session() as session:
+            rows = session.exec(
+                select(TickerPeriod.ticker)
+                .where(
+                    func.to_char(TickerPeriod.start_date, 'YYYY-MM') == month,
+                    TickerPeriod.source.in_(sources)
+                )
+            ).all()
+        return rows
