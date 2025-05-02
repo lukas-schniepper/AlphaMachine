@@ -18,24 +18,25 @@ class StockDataManager:
 
     def add_tickers_for_period(self, tickers, period_start_date, period_end_date=None, source_name="manual"):
         start = pd.to_datetime(period_start_date).date()
-        end = (pd.to_datetime(period_end_date).date() if period_end_date else
-               (pd.to_datetime(start) + pd.offsets.MonthEnd(1)).date())
+        end = (pd.to_datetime(period_end_date).date() if period_end_date
+            else (pd.to_datetime(start) + pd.offsets.MonthEnd(1)).date())
         created = []
         with get_session() as session:
             for t in tickers:
                 exists = session.exec(
                     select(TickerPeriod).where(
-                        TickerPeriod.ticker == t,
+                        TickerPeriod.ticker    == t,
                         TickerPeriod.start_date == start,
-                        TickerPeriod.end_date == end
+                        TickerPeriod.end_date   == end,
+                        TickerPeriod.source     == source_name
                     )
                 ).first()
                 if not exists:
                     obj = TickerPeriod(
-                        ticker=t,
-                        start_date=start,
-                        end_date=end,
-                        source=source_name
+                        ticker     = t,
+                        start_date = start,
+                        end_date   = end,
+                        source     = source_name
                     )
                     session.add(obj)
                     created.append(t)
@@ -55,9 +56,9 @@ class StockDataManager:
         for ticker in tickers:
             with get_session() as session:
                 last = session.exec(
-                    select(PriceData.date)
+                    select(PriceData.trade_date)
                     .where(PriceData.ticker == ticker)
-                    .order_by(PriceData.date.desc())
+                    .order_by(PriceData.trade_date.desc())
                 ).first()
             start_date = (last + dt.timedelta(days=1)) if last else history_dt
 
@@ -96,7 +97,7 @@ class StockDataManager:
                 objs = [
                     PriceData(
                         ticker=r['ticker'],
-                        date=r['date'],
+                        trade_date=r['date'],
                         open=float(r['open']),
                         high=float(r['high']),
                         low=float(r['low']),
@@ -120,14 +121,14 @@ class StockDataManager:
             info = yf.Ticker(ticker).info
             with get_session() as session:
                 first_date = session.exec(
-                    select(PriceData.date)
+                    select(PriceData.trade_date)
                     .where(PriceData.ticker == ticker)
-                    .order_by(PriceData.date)
+                    .order_by(PriceData.trade_date)
                 ).first()
                 last_date = session.exec(
-                    select(PriceData.date)
+                    select(PriceData.trade_date)
                     .where(PriceData.ticker == ticker)
-                    .order_by(PriceData.date.desc())
+                    .order_by(PriceData.trade_date.desc())
                 ).first()
 
                 if isinstance(first_date, tuple):
@@ -192,8 +193,8 @@ class StockDataManager:
                 select(PriceData)
                 .where(
                     PriceData.ticker.in_(tickers),
-                    PriceData.date >= sd,
-                    PriceData.date <= ed
+                    PriceData.trade_date >= sd,
+                    PriceData.trade_date <= ed
                 )
             ).all()
 

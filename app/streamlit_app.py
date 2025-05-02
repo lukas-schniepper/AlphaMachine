@@ -190,7 +190,7 @@ def show_backtester_ui():
 
     price_df = (
         pd.DataFrame([r.model_dump() for r in raw])
-          .assign(date=lambda df: pd.to_datetime(df["date"]))
+          .assign(date=lambda df: pd.to_datetime(df["trade_date"]))
           .pivot(index="date", columns="ticker", values="close")
           .sort_index()
     )
@@ -365,8 +365,8 @@ def show_backtester_ui():
         st.subheader("🗓️ Yearly Performance Detail")
         if not engine.price_data.empty and not engine.portfolio_value.empty:
             # 1) Jahr-Endkurse und Jahr-End-Portfolio-Wert
-            yearly_prices  = engine.price_data.resample("Y").last()
-            yearly_balance = engine.portfolio_value.resample("Y").last()
+            yearly_prices  = engine.price_data.resample("YE").last()
+            yearly_balance = engine.portfolio_value.resample("YE").last()
 
             # 2) Index benennen, damit reset_index eine Date-Spalte erzeugt
             yearly_prices.index.name  = "Date"
@@ -412,7 +412,11 @@ def show_backtester_ui():
     with tabs[4]:
         st.subheader("📊 Monthly Allocation")
         if not engine.monthly_allocations.empty:
-            st.dataframe(engine.monthly_allocations, use_container_width=True)
+            df_sorted = engine.monthly_allocations.sort_values(
+                by="Rebalance Date",
+                ascending=False
+            )
+            st.dataframe(df_sorted, use_container_width=True)
 
     with tabs[5]:
         # hole das letzte Datum aus engine.portfolio_value (oder price_data)
@@ -533,6 +537,7 @@ def show_backtester_ui():
     with tabs[9]:
         st.subheader("⚙️ Ausgewählte Backtest-Parameter")
         df_params = pd.DataFrame(ui_params.items(), columns=["Parameter", "Wert"])
+        df_params["Wert"] = df_params["Wert"].astype(str)
         st.dataframe(df_params, use_container_width=True)
 
     # Tab 8: Logs
@@ -574,7 +579,7 @@ def show_data_ui():
         # erst bestehende Quellen aus der DB holen (plus Default-Werte)
         with get_session() as session:
             existing = list(session.exec(select(TickerPeriod.source)).unique())
-        defaults = ["SeekingAlpha","TipRanks","Topweights"]
+        defaults = ["Topweights"]
         options = sorted(set(existing + defaults))
         options.append("Andere…")
         source = st.selectbox("Quelle", options)
@@ -666,7 +671,7 @@ def show_data_ui():
     #if raw:
     #    st.write(raw[:3])  # oder raw[0].model_dump() / raw[0].dict()
     
-    records = [{"date":r.date, "open":r.open, "high":r.high, "low":r.low, "close":r.close, "volume":r.volume} for r in raw]
+    records = [{"date":r.trade_date, "open":r.open, "high":r.high, "low":r.low, "close":r.close, "volume":r.volume} for r in raw]
     pdf = pd.DataFrame(records)
     if pdf.empty:
         st.info("Keine Preisdaten im gewählten Zeitraum.")
