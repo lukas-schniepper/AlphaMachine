@@ -33,65 +33,70 @@ from AlphaMachine_core.config import (
 class SharpeBacktestEngine:
     def __init__(
         self,
-        price_data,
-        start_balance,
-        num_stocks,
-        start_month: str, 
+        price_data: pd.DataFrame,
+        start_balance: float,
+        num_stocks: int,
+        start_month: str,
         universe_mode: str = "static",
         optimize_weights=None,
         optimizer_method=None,
         cov_estimator=None,
-        min_weight=MIN_WEIGHT,
-        max_weight=MAX_WEIGHT,
-        window_days=BACKTEST_WINDOW_DAYS,
-        force_equal_weight=FORCE_EQUAL_WEIGHT,
-        rebalance_frequency=REBALANCE_FREQUENCY,
-        custom_rebalance_months=CUSTOM_REBALANCE_MONTHS,
-        enable_trading_costs=ENABLE_TRADING_COSTS,
-        fixed_cost_per_trade=FIXED_COST_PER_TRADE,
-        variable_cost_pct=VARIABLE_COST_PCT,
+        min_weight: float = MIN_WEIGHT,
+        max_weight: float = MAX_WEIGHT,
+        window_days: int = BACKTEST_WINDOW_DAYS,
+        force_equal_weight: bool = FORCE_EQUAL_WEIGHT,
+        rebalance_frequency: str = REBALANCE_FREQUENCY,
+        custom_rebalance_months: int = CUSTOM_REBALANCE_MONTHS,
+        enable_trading_costs: bool = ENABLE_TRADING_COSTS,
+        fixed_cost_per_trade: float = FIXED_COST_PER_TRADE,
+        variable_cost_pct: float = VARIABLE_COST_PCT,
+        optimization_mode: str = OPTIMIZATION_MODE,
     ):
+        # ➊ Unveränderliche Kern-Parameter
+        self.price_data      = price_data
+        self.start_balance   = start_balance
+        self.num_stocks      = num_stocks
+        self.start_month     = pd.Period(start_month, "M")
 
-        self.optimizer_method = (
-            optimizer_method if optimizer_method is not None else OPTIMIZER_METHOD
-        )
-        self.price_data = price_data
-        self.start_balance = start_balance
-        self.num_stocks = num_stocks
-        self.optimize_weights = (
-            optimize_weights if optimize_weights is not None else OPTIMIZE_WEIGHTS
-        )
-        self.cov_estimator = (
-            cov_estimator if cov_estimator is not None else COV_ESTIMATOR
-        )
-        self.min_weight = min_weight
-        self.max_weight = max_weight
-        self.window_days = window_days
-        self.portfolio_value = pd.Series(dtype=float)
-        self.daily_df = pd.DataFrame()
-        self.selection_details = []
-        self.monthly_allocations = pd.DataFrame()
-        self.filtered_tickers = []
-        self.filtered_tickers_by_month = {}
-        self.monthly_filtered_report = []
-        self.log_lines = []
+        # ➋ Universe-Mode speichern
+        self.universe_mode   = universe_mode.lower()
+
+        # ➌ Coverage-Filter nur im dynamischen ("dynamic") Mode anwenden
+        if self.universe_mode == "dynamic":
+            self._filter_complete_tickers()
+        else:
+            # Im static Mode behalten wir alle übergebenen Ticker
+            self.filtered_tickers          = []
+            self.filtered_tickers_by_month = {}
+            self.monthly_filtered_report   = []
+
+        # ➍ Leere DataFrames / Listen initialisieren
+        self.portfolio_value    = pd.Series(dtype=float)
+        self.daily_df           = pd.DataFrame()
+        self.monthly_allocations= pd.DataFrame()
+        self.selection_details  = []
+        self.log_lines          = []
         self.ticker_coverage_logs = []
-        self.missing_months = []
-        self.performance_metrics = pd.DataFrame()
-        self.monthly_performance = pd.DataFrame()
-        self._filter_complete_tickers()
-        self.rebalance_freq = rebalance_frequency  # "weekly", "monthly" oder custom
-        self.custom_rebalance_months = custom_rebalance_months
-        self.max_turnover = MAX_TURNOVER
-        self.use_benchmark = USE_BENCHMARK
-        self.optimization_mode = OPTIMIZATION_MODE
-        self.force_equal_weight = force_equal_weight
-        self.enable_trading_costs = enable_trading_costs
-        self.fixed_cost_per_trade = fixed_cost_per_trade
-        self.variable_cost_pct = variable_cost_pct
-        self.total_trading_costs = 0.0
-        self.universe_mode = universe_mode.lower()
-        self.start_month = pd.Period(start_month, "M")
+        self.missing_months     = []
+        self.performance_metrics= pd.DataFrame()
+        self.monthly_performance= pd.DataFrame()
+        self.total_trading_costs= 0.0
+
+        # ➎ Optimierungs- & Rebalance-Parameter setzen
+        self.optimize_weights       = optimize_weights if optimize_weights is not None else OPTIMIZE_WEIGHTS
+        self.optimizer_method       = optimizer_method   if optimizer_method   is not None else OPTIMIZER_METHOD
+        self.cov_estimator          = cov_estimator      if cov_estimator      is not None else COV_ESTIMATOR
+        self.min_weight             = min_weight
+        self.max_weight             = max_weight
+        self.window_days            = window_days
+        self.force_equal_weight     = force_equal_weight
+        self.rebalance_freq         = rebalance_frequency
+        self.custom_rebalance_months= custom_rebalance_months
+        self.enable_trading_costs   = enable_trading_costs
+        self.fixed_cost_per_trade   = fixed_cost_per_trade
+        self.variable_cost_pct      = variable_cost_pct
+        self.optimization_mode      = optimization_mode if optimization_mode is not None else OPTIMIZATION_MODE
+
 
     def _get_valid_tickers(self, threshold=0.95):
         full_range = pd.date_range(
@@ -157,25 +162,7 @@ class SharpeBacktestEngine:
         self.ticker_coverage_logs.append(f"❌ {len(invalid)} tickers filtered out")
         self.price_data = self.price_data[valid]
 
-    def run_with_next_month_allocation(
-        self,
-        top_universe_size=100,
-        optimizer_method="ledoit-wolf",
-        force_equal_weight=False,
-    ):
-
-        # --- apply static universe if requested ----------------
-        if self.universe_mode == "static":
-            # find tickers present in the start_month (at least one price)
-            mask = self.price_data.index.to_period("M") == self.start_month
-            tickers_at_start = (
-                self.price_data.loc[mask]
-                .dropna(axis=1, how="all")
-                .columns
-                .tolist()
-            )
-            # permanently restrict price_data to that static list
-            self.price_data = self.price_data[tickers_at_start]
+    def run_with_next_month_allocation(self, top_universe_size: int = 100):
 
         # now compute returns on the (possibly filtered) data
         returns = self.price_data.pct_change().dropna()
@@ -186,6 +173,13 @@ class SharpeBacktestEngine:
             frequency=self.rebalance_freq,
             custom_months=self.custom_rebalance_months,
         )
+
+        # DEBUG
+        print("🗓️ Rebalance Schedule:", [e["rebalance_date"].strftime("%Y-%m-%d") for e in rebalance_schedule])
+        print("▶️ schedule Länge:", len(rebalance_schedule))
+        print("⚙️ custom_rebalance_months =", self.custom_rebalance_months," | rebalance_freq =", self.rebalance_freq)
+        # ------------------
+
         expected_months = pd.date_range(
             start=self.price_data.index.min(),
             end=self.price_data.index.max(),
@@ -217,7 +211,10 @@ class SharpeBacktestEngine:
             filtered_returns = sub_returns[top_universe]
 
             print(
-                f"🔍 Rebalance {date.date()} | Optimizer: {optimizer_method} | Mode: {self.optimization_mode} | CovEstimator: {self.cov_estimator}"
+                f"🔍 Rebalance {date.date()}"
+                f" | Optimizer: {self.optimizer_method}"
+                f" | Mode: {self.optimization_mode}"
+                f" | CovEstimator: {self.cov_estimator}"
             )
 
             if self.optimization_mode == "select-then-optimize":
@@ -254,10 +251,10 @@ class SharpeBacktestEngine:
                 )
 
             selection_detail = {
-                "Rebalance Date": date.date(),
+                "Rebalance Date": date.strftime("%Y-%m-%d"),
                 "Actual Rebalance Day": date.strftime("%Y-%m-%d"),
                 "Top Universe Size": len(top_universe),
-                "Optimization Method": optimizer_method,
+                "Optimization Method": self.optimizer_method,
                 "Cov Estimator": self.cov_estimator,
                 "Selected Tickers": ", ".join(top_tickers),
                 "Rebalance Frequency": self.rebalance_freq,
@@ -357,11 +354,72 @@ class SharpeBacktestEngine:
         ]
 
         if self.missing_months:
-            log = "⚠️ Rebalance fehlt für folgende Monate: " + ", ".join(
-                self.missing_months
-            )
+            log = "⚠️ Rebalance fehlt für folgende Monate: " + ", ".join(self.missing_months)
             print(log)
             self.log_lines.append(log)
+
+        # — Next-Month-Auswahl berechnen ———————————————————————————————
+        last_date    = self.price_data.index.max()
+        window_start = last_date - pd.Timedelta(days=self.window_days)
+        sub_returns  = returns.loc[window_start:last_date].dropna(axis=1, how="all")
+
+        if sub_returns.shape[1] == 0:
+            self.next_month_tickers = []
+            self.next_month_weights = pd.Series(dtype=float)
+            self._calculate_performance_metrics()
+            return self.portfolio_value
+
+        if self.optimization_mode == "select-then-optimize":
+            # Variante A: Sharpe zuerst, dann Top N
+            # 1) Sharpe-Pre-Screening
+            top_sharpe    = select_top_sharpe_tickers(sub_returns, top_universe_size)
+            candidates    = list(top_sharpe[: self.num_stocks])
+            # 2) Jetzt wirklich optimieren (so wie im Backtest)
+            weights_series = optimize_portfolio(
+                returns=sub_returns[candidates],
+                method=self.optimizer_method,
+                cov_estimator=self.cov_estimator,
+                min_weight=self.min_weight,
+                max_weight=self.max_weight,
+                force_equal_weight=self.force_equal_weight,
+                debug_label="A - Optimizer only weight",
+                num_stocks=self.num_stocks,
+            )
+            # alle Ticker mit >0 Gewicht
+            next_universe       = weights_series[weights_series>0].index.tolist()
+            self.next_month_weights = weights_series.loc[next_universe]
+
+        elif self.optimization_mode == "optimize-subset":
+            # Variante B: das ganze Universum gewichten und dann Top N nach Gewicht auswählen
+            # debug_label ohne "B - Optimizer selects & weights", damit keine interne Pre-Selection
+            weights_full = optimize_portfolio(
+                returns=sub_returns,
+                method=self.optimizer_method,
+                cov_estimator=self.cov_estimator,
+                min_weight=self.min_weight,
+                max_weight=self.max_weight,
+                force_equal_weight=self.force_equal_weight,
+                debug_label="B - NextMonth full optimize",  # kein Pre-Select
+                num_stocks=self.num_stocks,
+            )
+            # jetzt die Top N Ticker nach Gewicht
+            next_universe = weights_full.sort_values(ascending=False).head(self.num_stocks).index.tolist()
+            self.next_month_weights = weights_full.loc[next_universe]
+
+        else:
+            # Fallback: keine Auswahl
+            next_universe = []
+            self.next_month_weights = pd.Series(dtype=float)
+
+        # Wenn Du im statischen Universe bist, weiterhin beschränken
+        if self.universe_mode == "static":
+            next_universe = [t for t in next_universe if t in self.price_data.columns]
+            self.next_month_weights = self.next_month_weights.reindex(next_universe).fillna(0)
+
+        # Zum Abschluss
+        self.next_month_tickers = next_universe
+
+        print("🔮 Next-Month-Universe:", self.next_month_tickers)
 
         self._calculate_performance_metrics()
         return self.portfolio_value

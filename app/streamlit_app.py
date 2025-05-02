@@ -68,7 +68,7 @@ def show_backtester_ui():
     col1, col2 = st.sidebar.columns(2)
     start_date = col1.date_input(
         "Backtest-Startdatum",
-        value=dt.date.today() - dt.timedelta(days=365),
+        value=dt.date.today() - dt.timedelta(days=5*365),
         max_value=dt.date.today()
     )
     end_date = col2.date_input(
@@ -195,6 +195,16 @@ def show_backtester_ui():
           .sort_index()
     )
 
+    # ‣ wenn weniger Ticker da sind als num_stocks, auf available runterschrauben
+    orig_num_stocks = num_stocks
+    available = price_df.shape[1]
+    if available < orig_num_stocks:
+        st.warning(
+            f"Achtung: nur {available} Aktien verfügbar; "
+            f"Backtest wird mit {available} statt {orig_num_stocks} laufen"
+        )
+        num_stocks = available
+
     #DEBUG
     #st.write("🔎 price_df shape:", price_df.shape)
     #st.write(price_df.head())
@@ -218,9 +228,33 @@ def show_backtester_ui():
             enable_trading_costs=enable_tc,
             fixed_cost_per_trade=fixed_cost,
             variable_cost_pct=var_cost,
+            optimization_mode=opt_mode,
         )
 
         engine.universe_mode = "static" if mode.startswith("statisch") else "dynamic"
+
+        # collect infos for Parameter tab
+        ui_params = {
+            "Backtest Startdatum": start_date.strftime("%Y-%m-%d"),
+            "Backtest Enddatum":   end_date.strftime("%Y-%m-%d"),
+            "Quellen":             ", ".join(sources),
+            "Periode (YYYY-MM)":    month,
+            "Ticker-Universe":      mode,
+            "Lookback Days":        window_days,
+            "Startkapital":         start_balance,
+            "Aktien pro Portfolio": num_stocks,
+            "Optimierer":           opt_method,
+            "Kovarianzschätzer":    cov_estimator,
+            "Optimierungsmodus":    opt_mode,
+            "Rebalance":            rebalance_freq,
+            "Custom Monate":        custom_months if rebalance_freq=="custom" else "-",
+            "Min Weight (%)":       round(min_w*100,2),
+            "Max Weight (%)":       round(max_w*100,2),
+            "Force Equal Weight":   force_eq,
+            "Trading-Kosten aktiv": enable_tc,
+            "Fixe Kosten/Trade":    fixed_cost,
+            "Variable Kosten (%)":  round(var_cost*100,2)
+        }
 
         #DEBUG
         #st.write(f"🔎 running backtest on {price_df.shape[0]} days × {price_df.shape[1]} tickers")
@@ -233,13 +267,24 @@ def show_backtester_ui():
         #st.write("🔎 performance_metrics:", engine.performance_metrics)
         #------------------------
 
-    st.success("Backtest fertig ✅")
+    msg = "Backtest fertig ✅"
+    if available < orig_num_stocks:
+        msg += f"  (Achtung: nur {available} Stocks vorhanden statt {orig_num_stocks})"
+    st.success(msg)
 
     # Tabs
     tabs = st.tabs([
-        "Dashboard","Portfolio","Daily","Monthly Allocation",
-        "Performance","Risk","Drawdowns","Trading Costs",
-        "Rebalance","Selection","Logs"
+        "Dashboard",
+        "Daily",
+        "Monthly",
+        "Yearly",
+        "Monthly Allocation",
+        "Next Month Allocation",
+        "Drawdowns",
+        "Trading Costs",
+        "Rebalance",
+        "Paramter",
+        "Logs"
     ])
 
     with tabs[0]:
@@ -247,53 +292,254 @@ def show_backtester_ui():
         if not engine.performance_metrics.empty:
             st.dataframe(engine.performance_metrics, hide_index=True, use_container_width=True)
 
-
-    with tabs[1]:
+        st.markdown("---")
         st.subheader("📈 Portfolio-Verlauf")
         if not engine.portfolio_value.empty:
             st.line_chart(engine.portfolio_value)
 
-
-    with tabs[2]:
-        st.subheader("📅 Daily Portfolio")
-        if not engine.daily_df.empty:
-            st.dataframe(engine.daily_df, use_container_width=True)
-
-    with tabs[3]:
-        st.subheader("📊 Monthly Allocation")
-        if not engine.monthly_allocations.empty:
-            st.dataframe(engine.monthly_allocations, use_container_width=True)
-
-    with tabs[4]:
+        st.markdown("---")
         st.subheader("📆 Monatliche Performance (%)")
         if not engine.monthly_performance.empty:
             st.bar_chart(
                 engine.monthly_performance.set_index("Date")["Monthly PnL (%)"]
             )
 
+    with tabs[1]:
+        st.subheader("📅 Daily Portfolio")
+        if not engine.daily_df.empty:
+            st.dataframe(engine.daily_df, use_container_width=True)
+
+    with tabs[2]:
+        st.subheader("🗓️ Monthly Performance Detail")
+        if not engine.price_data.empty and not engine.portfolio_value.empty:
+            # 1) Monats-Endkurse und Monats-End-Portfolio-Wert
+            monthly_prices  = engine.price_data.resample("ME").last()
+            monthly_balance = engine.portfolio_value.resample("ME").last()
+
+            # 2) Index-Namen setzen, damit reset_index() eine Spalte "Date" erzeugt
+            monthly_prices.index.name  = "Date"
+            monthly_balance.index.name = "Date"
+
+            # 3) Monatsrenditen in Prozent
+            monthly_returns = monthly_prices.pct_change().dropna() * 100
+
+            # 4) Portfolio-Monatsrendite aus engine.monthly_performance
+            port_rets = (
+                engine.monthly_performance
+                    .set_index("Date")["Monthly PnL (%)"]
+            )
+
+            # 5) alles in ein DataFrame packen
+            df = monthly_returns.copy()
+            df["Balance"]    = monthly_balance
+            df["Return (%)"] = port_rets
+
+            # 6) Index in Spalte umwandeln – jetzt gibt es garantiert eine Spalte "Date"
+            df = df.reset_index()
+
+            # 7) Jahr und Monatsname aus "Date" ableiten
+            df["Year"]  = df["Date"].dt.year
+            df["Month"] = df["Date"].dt.month_name()
+
+            # 8) **WICHTIG**: zuerst nach Date absteigend sortieren
+            df = df.sort_values("Date", ascending=False).reset_index(drop=True)
+
+            # 9) dann die finalen Spalten in der gewünschten Reihenfolge auswählen
+            cols = ["Year", "Month", "Return (%)", "Balance"] + list(monthly_returns.columns)
+            df = df[cols]
+
+            # 10) Formatierung: Prozent-Spalten mit 1 Dezimalstelle und Prozentzeichen
+            percent_cols = ["Return (%)"] + list(monthly_returns.columns)
+            fmt = {
+                **{c: "{:.1f}%" for c in percent_cols},   # Prozent-Spalten mit 1 Dezimalstelle + '%'
+                "Balance": "{:,.0f}"                      # Balance ohne Dezimalstellen, Tausender-Komma
+            }
+            styled = df.style.format(fmt)
+
+            st.dataframe(styled, use_container_width=True)
+
+        else:
+            st.info("Keine Daten für Monthly Performance.")
+
+    with tabs[3]:
+        st.subheader("🗓️ Yearly Performance Detail")
+        if not engine.price_data.empty and not engine.portfolio_value.empty:
+            # 1) Jahr-Endkurse und Jahr-End-Portfolio-Wert
+            yearly_prices  = engine.price_data.resample("Y").last()
+            yearly_balance = engine.portfolio_value.resample("Y").last()
+
+            # 2) Index benennen, damit reset_index eine Date-Spalte erzeugt
+            yearly_prices.index.name  = "Date"
+            yearly_balance.index.name = "Date"
+
+            # 3) Jahres-Renditen in Prozent für alle Ticker
+            yearly_returns = yearly_prices.pct_change().dropna() * 100
+
+            # 4) Portfolio-Jahresrendite
+            port_year_rets = yearly_balance.pct_change().dropna() * 100
+
+            # 5) DataFrame zusammenbauen
+            df_year = yearly_returns.copy()
+            df_year["Balance"]    = yearly_balance
+            df_year["Return (%)"] = port_year_rets
+
+            # 6) Index in Spalte umwandeln
+            df_year = df_year.reset_index()
+
+            # 7) Year aus der Date-Spalte
+            df_year["Year"] = df_year["Date"].dt.year
+
+            # 8) Spalten in gewünschter Reihenfolge
+            cols = ["Year", "Return (%)", "Balance"] + list(yearly_returns.columns)
+            df_year = df_year[cols]
+
+            # 9) Neueste Jahre zuerst
+            df_year = df_year.sort_values("Year", ascending=False).reset_index(drop=True)
+
+            # 10) Prozentformatierung auf 1 Dezimalstelle
+            percent_cols = ["Return (%)"] + list(yearly_returns.columns)
+            fmt = {
+                **{c: "{:.1f}%" for c in percent_cols},     # Percent columns
+                "Balance": "{:,.0f}"                        # Balance: no decimals, comma as thousands separator
+            }
+            styled = df_year.style.format(fmt)
+
+            st.dataframe(styled, use_container_width=True)
+        else:
+            st.info("Keine Daten für Yearly Performance.")
+
+
+    with tabs[4]:
+        st.subheader("📊 Monthly Allocation")
+        if not engine.monthly_allocations.empty:
+            st.dataframe(engine.monthly_allocations, use_container_width=True)
+
     with tabs[5]:
-        st.subheader("⚠️ Risiko")
-        st.dataframe(engine.performance_metrics, use_container_width=True)
+        # hole das letzte Datum aus engine.portfolio_value (oder price_data)
+        last_date = engine.price_data.index.max()
+
+        # bestimme den aktuellen Monat und addiere 1
+        next_period = last_date.to_period("M") + 1
+
+        # formatiere Anf- und Enddatum
+        start = next_period.to_timestamp(how="start").strftime("%d. %B %Y")
+        end   = next_period.to_timestamp(how="end").strftime("%d. %B %Y")
+
+        # Anzeige in Deinem Tab:
+        st.subheader("🔮 Next Month Allocation")
+        st.markdown(f"**Zeitraum:** {start} – {end}")
+
+        if hasattr(engine, "next_month_weights"):
+            df_next = (
+                engine.next_month_weights
+                    .mul(100)               # in Prozent
+                    .reset_index()
+            )
+            df_next.columns = ["Ticker","Gewicht (%)"]
+            st.dataframe(df_next, use_container_width=True)
+        else:
+            st.info("Keine Auswahl für den Folgemonat (zu wenige Daten).")
 
     with tabs[6]:
-        st.subheader("📉 Drawdowns")
-        st.dataframe(engine.performance_metrics, use_container_width=True)
+        st.subheader("📉 Top 10 Drawdowns")
+        # Drawdown-Berechnung
+        df_port = engine.portfolio_value.to_frame(name="Portfolio")
+        df_port["Peak"] = df_port["Portfolio"].cummax()
+        df_port["Drawdown"] = df_port["Portfolio"] / df_port["Peak"] - 1
 
+        # Drawdown-Episoden extrahieren
+        periods = []
+        in_dd = False
+        for date, row in df_port.iterrows():
+            if not in_dd and row["Drawdown"] < 0:
+                in_dd = True
+                start = date
+                peak_val = row["Peak"]
+                trough_val = row["Portfolio"]
+                trough = date
+            elif in_dd:
+                if row["Portfolio"] < trough_val:
+                    trough_val = row["Portfolio"]
+                    trough = date
+                if row["Portfolio"] >= peak_val:
+                    # Drawdown abgeschlossen
+                    periods.append({
+                        "Start":            start.date(),
+                        "Trough":           trough.date(),
+                        "End":              date.date(),
+                        "Length (Days)":    (date - start).days,
+                        "Recovery Time":    (date - trough).days,
+                        "Drawdown (%)":     round((trough_val/peak_val - 1)*100, 2),
+                    })
+                    in_dd = False
+
+        # laufende DD-Periode (falls nicht abgeschlossen)
+        if in_dd:
+            last_date = df_port.index[-1]
+            periods.append({
+                "Start":         start.date(),
+                "Trough":        trough.date(),
+                "End":           last_date.date(),
+                "Length (Days)": (last_date - start).days,
+                "Recovery Time": None,
+                "Drawdown (%)":  round((trough_val/peak_val - 1)*100, 2),
+            })
+
+        # Top 10 sortiert nach Drawdown‐Size
+        df_dd = (
+            pd.DataFrame(periods)
+            .sort_values(by="Drawdown (%)")  # drawdowns sind negativ, also aufsteigend = größter Drawdown zuerst
+            .head(10)
+            .reset_index(drop=True)
+        )
+
+        # Spaltenreihenfolge und Header anpassen
+        df_dd = df_dd[
+            ["Start", "End", "Length (Days)", "Recovery Time", "Trough", "Drawdown (%)"]
+        ]
+        df_dd.columns = [
+            "Start", "End", "Length", "Recovery Time", "Underwater Period", "Drawdown"
+        ]
+
+        st.dataframe(df_dd, use_container_width=True)
+
+    # Tab 5: Trading Costs
     with tabs[7]:
         st.subheader("💸 Trading Costs")
-        st.dataframe(engine.performance_metrics, use_container_width=True)
+        if not engine.monthly_allocations.empty and "Trading Costs" in engine.monthly_allocations:
+            cost_df = (
+                engine.monthly_allocations
+                    .dropna(subset=["Trading Costs"])
+                    .groupby("Rebalance Date")["Trading Costs"]
+                    .sum()
+                    .reset_index(name="Total Trading Costs")
+            )
+            st.dataframe(cost_df, use_container_width=True)
+        else:
+            st.info("Keine Trading-Kosten-Daten vorhanden.")
 
+    # Tab 6: Rebalance Analysis
     with tabs[8]:
         st.subheader("🔁 Rebalance Analysis")
-        st.dataframe(pd.DataFrame(engine.selection_details), use_container_width=True)
+        df_reb = pd.DataFrame(engine.selection_details)
+        # nur echte Rebalances, keine SUMMARY-Zeile
+        df_reb = df_reb[df_reb["Rebalance Date"] != "SUMMARY"].copy()
+        if len(df_reb) > 1:
+            df_reb["Rebalance Date"] = pd.to_datetime(df_reb["Rebalance Date"])
+            df_reb["Days Since Last"] = df_reb["Rebalance Date"].diff().dt.days
+        st.dataframe(df_reb, use_container_width=True)
 
+    # Tab 7: Parameters
     with tabs[9]:
-        st.subheader("🔍 Selection Details")
-        st.dataframe(pd.DataFrame(engine.selection_details), use_container_width=True)
+        st.subheader("⚙️ Ausgewählte Backtest-Parameter")
+        df_params = pd.DataFrame(ui_params.items(), columns=["Parameter", "Wert"])
+        st.dataframe(df_params, use_container_width=True)
 
+    # Tab 8: Logs
     with tabs[10]:
         st.subheader("🪵 Logs")
-        st.text("\n".join(engine.log_lines))
+        for line in engine.ticker_coverage_logs + engine.log_lines:
+            st.text(line)
 
     # Excel Download
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -382,6 +628,7 @@ def show_data_ui():
                 dm.delete_period(pid)
             st.success(f"{len(to_del)} Einträge gelöscht.")
             st.experimental_rerun()
+            return
     else:
         st.info("Keine Period-Einträge für diesen Monat/Quelle.")
         # kein return hier, wir wollen trotzdem TickerInfo sehen

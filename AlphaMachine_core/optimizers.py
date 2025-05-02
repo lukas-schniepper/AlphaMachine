@@ -173,6 +173,9 @@ def optimize_portfolio(
         cons = {"type": "eq", "fun": lambda w: np.sum(w) - 1}
         bounds = [(min_weight, max_weight)] * len(tickers)
         x0 = np.ones(len(tickers)) / len(tickers)
+        x0 = np.clip(x0, min_weight, max_weight)   # innerhalb der [min_weight, max_weight] bringen
+        x0 = x0 / x0.sum()        
+        
         result = minimize(
             objective, x0, method="SLSQP", bounds=bounds, constraints=[cons]
         )

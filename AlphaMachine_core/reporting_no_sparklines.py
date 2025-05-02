@@ -7,88 +7,71 @@ from openpyxl.drawing.image import Image as XLImage
 from datetime import date
 from scipy.stats import kurtosis, skew
 
-
 def export_results_to_excel(engine, filepath):
-    """Exportiert die Backtest-Ergebnisse als Excel-Datei (mit Trading-Kosten und Rebalance-Frequenz)"""
+    """Exportiert die Backtest-Ergebnisse als Excel-Datei (mit Trading-Kosten, Rebalance-Analyse und Next Month Allocation)."""
     try:
         with pd.ExcelWriter(filepath, engine="openpyxl") as writer:
+            # … bestehende Blätter …
             if engine.selection_details:
                 pd.DataFrame(engine.selection_details).to_excel(
                     writer, sheet_name="Selection Details", index=False
                 )
-
             if engine.missing_months:
                 pd.DataFrame(
                     {"Missing Rebalance Month": engine.missing_months}
                 ).to_excel(writer, sheet_name="Missing Months", index=False)
-
             if engine.log_lines or engine.ticker_coverage_logs:
                 pd.DataFrame(
-                    {
-                        "Log Output": engine.ticker_coverage_logs
-                        + [""]
-                        + engine.log_lines
-                    }
+                    {"Log Output": engine.ticker_coverage_logs + [""] + engine.log_lines}
                 ).to_excel(writer, sheet_name="Run Log", index=False)
-
             if not engine.performance_metrics.empty:
                 engine.performance_metrics.to_excel(
                     writer, sheet_name="Performance Summary", index=False
                 )
-
             if not engine.daily_df.empty:
                 engine.daily_df.to_excel(
                     writer, sheet_name="Daily Portfolio", index=False
                 )
-
             if not engine.monthly_allocations.empty:
                 engine.monthly_allocations.to_excel(
                     writer, sheet_name="Monthly Allocation", index=False
                 )
-
-            if not engine.portfolio_value.empty:
-                pd.DataFrame(
-                    {
-                        "Date": engine.portfolio_value.index,
-                        "Portfolio Value": engine.portfolio_value.values,
-                    }
-                ).to_excel(writer, sheet_name="Portfolio Value", index=False)
-
             if not engine.monthly_performance.empty:
                 engine.monthly_performance.to_excel(
                     writer, sheet_name="Monthly PnL", index=False
                 )
 
-            # Create summary sheets with the new metrics
-            create_dashboard_sheet(engine, writer)  # Updated to include trading costs
+            # Dashboard, Risk, Drawdowns, Trading Costs, Rebalance Analysis
+            create_dashboard_sheet(engine, writer)
             create_risk_metrics_sheet(engine, writer)
             create_drawdown_sheet(engine, writer)
-
-            # New sheet for trading costs analysis
             create_trading_costs_sheet(engine, writer)
-
-            # New sheet for rebalancing analysis
             create_rebalance_analysis_sheet(engine, writer)
 
+            # —— neu: Next Month Allocation ——
+            if hasattr(engine, 'next_month_weights'):
+                df_next = engine.next_month_weights.mul(100).reset_index()
+                df_next.columns = ['Ticker', 'Weight (%)']
+                df_next.to_excel(writer,
+                                 sheet_name='Next Month Allocation',
+                                 index=False)
+
+        # Portfolio-Chart ins Excel
         _add_portfolio_chart(filepath, engine.portfolio_value)
 
         print(f"✅ Excel-Report gespeichert unter: {filepath}")
         if engine.missing_months:
             print("⚠️ Fehlende Monate:", ", ".join(engine.missing_months))
+
     except Exception as e:
-        print(f"❌ Fehler beim Export: {str(e)}")
+        print(f"❌ Fehler beim Export: {e}")
 
 
 def _add_portfolio_chart(filepath, portfolio_series):
-    """Fügt ein einfaches Liniendiagramm zur Excel-Datei hinzu"""
+    """Fügt ein Liniendiagramm zur Excel-Datei hinzu."""
     try:
         fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(
-            portfolio_series.index,
-            portfolio_series.values,
-            label="Portfolio Value",
-            linewidth=2,
-        )
+        ax.plot(portfolio_series.index, portfolio_series.values, linewidth=2)
         ax.set_title("Portfolio Value Over Time")
         ax.set_xlabel("Date")
         ax.set_ylabel("Value")
@@ -107,7 +90,7 @@ def _add_portfolio_chart(filepath, portfolio_series):
         wb.save(filepath)
         buf.close()
     except Exception as e:
-        print(f"❌ Fehler beim Hinzufügen des Charts: {str(e)}")
+        print(f"❌ Fehler beim Hinzufügen des Charts: {e}")
 
 
 def create_dashboard_sheet(engine, writer):
