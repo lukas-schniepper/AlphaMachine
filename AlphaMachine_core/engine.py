@@ -425,25 +425,67 @@ class SharpeBacktestEngine:
         return self.portfolio_value
 
     def _calculate_performance_metrics(self):
+        """
+        Berechnet alle Performance‑Kennzahlen des Backtests und legt sie in
+        `self.performance_metrics` sowie `self.monthly_performance` ab.
+        """
+
+        # ------------------------------------------------------------
+        # 0) Grundvoraussetzung
+        # ------------------------------------------------------------
         if self.portfolio_value.empty:
             self.performance_metrics = pd.DataFrame()
+            self.monthly_performance = pd.DataFrame()
             return
 
+        # ------------------------------------------------------------
+        # 1) Basisgrößen
+        # ------------------------------------------------------------
         daily_returns = self.portfolio_value.pct_change().dropna()
-        total_return = self.portfolio_value.iloc[-1] / self.start_balance - 1
-        cagr = (self.portfolio_value.iloc[-1] / self.start_balance) ** (
+
+        total_return  = self.portfolio_value.iloc[-1] / self.start_balance - 1
+        cagr          = (self.portfolio_value.iloc[-1] / self.start_balance) ** (
             252 / len(self.portfolio_value)
         ) - 1
-        volatility = daily_returns.std() * np.sqrt(252)
-        sharpe = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252)
-        rolling_max = self.portfolio_value.cummax()
-        drawdown = (self.portfolio_value / rolling_max) - 1
-        max_dd = drawdown.min()
+        volatility    = daily_returns.std() * np.sqrt(252)
+        sharpe        = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252)
 
-        # Trading-Kosten als Prozentsatz des ursprünglichen Kapitals
+        rolling_max   = self.portfolio_value.cummax()
+        drawdown      = (self.portfolio_value / rolling_max) - 1
+        max_dd        = drawdown.min()
+
         trading_costs_pct = self.total_trading_costs / self.start_balance * 100
 
-        self.performance_metrics = pd.DataFrame(
+        # ------------------------------------------------------------
+        # 2) Zusätzliche Risiko‑Kennzahlen
+        # ------------------------------------------------------------
+        # 2‑A) Ulcer Index & UPI
+        ui  = np.sqrt(((drawdown[drawdown < 0] * 100) ** 2).mean())                # Prozent‑Skala
+        upi = cagr / (ui / 100) if ui != 0 else np.nan
+
+        # 2‑B) Sortino Ratio (Downside‑Vol)
+        downside = daily_returns[daily_returns < 0]
+        down_vol = downside.std() * np.sqrt(252)
+        rf_daily = 0.02 / 252                                                     # 2 % p. a. Beispiel
+        sortino  = ((daily_returns.mean() - rf_daily) / down_vol) * np.sqrt(252) if down_vol != 0 else np.nan
+
+        # 2‑C) Calmar Ratio
+        calmar = cagr / abs(max_dd) if max_dd != 0 else np.nan
+
+        # 2‑D) Omega Ratio (θ = 0 %)
+        theta  = 0.0
+        pos    = (daily_returns - theta).clip(lower=0).sum()
+        neg    = (theta - daily_returns).clip(lower=0).sum()
+        omega  = pos / neg if neg != 0 else np.nan
+
+        # 2‑E) Pain Ratio
+        avg_dd = abs(drawdown[drawdown < 0]).mean()
+        pain   = cagr / avg_dd if avg_dd != 0 else np.nan
+
+        # ------------------------------------------------------------
+        # 3) DataFrame zusammenstellen
+        # ------------------------------------------------------------
+        base_metrics_df = pd.DataFrame(
             {
                 "Metric": [
                     "Start Balance",
@@ -470,12 +512,42 @@ class SharpeBacktestEngine:
             }
         )
 
+        extra_metrics_df = pd.DataFrame(
+            {
+                "Metric": [
+                    "Ulcer Index",
+                    "Ulcer Performance Index",
+                    "Sortino Ratio",
+                    "Calmar Ratio",
+                    "Omega Ratio",
+                    "Pain Ratio",
+                ],
+                "Value": [
+                    f"{ui:.2f}",
+                    f"{upi:.2f}",
+                    f"{sortino:.2f}",
+                    f"{calmar:.2f}",
+                    f"{omega:.2f}",
+                    f"{pain:.2f}",
+                ],
+            }
+        )
+
+        self.performance_metrics = pd.concat(
+            [base_metrics_df, extra_metrics_df], ignore_index=True
+        )
+
+        # ------------------------------------------------------------
+        # 4) Monatliche Performance‑Tabelle
+        # ------------------------------------------------------------
         monthly_pnl = self.portfolio_value.resample("ME").last().pct_change().dropna()
         monthly_abs = self.portfolio_value.resample("ME").last().diff().dropna()
+
         self.monthly_performance = pd.DataFrame(
             {
-                "Date": monthly_pnl.index.date,
+                "Date":            monthly_pnl.index.date,
                 "Monthly PnL ($)": monthly_abs.values,
                 "Monthly PnL (%)": monthly_pnl.values * 100,
             }
         )
+

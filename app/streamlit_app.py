@@ -6,9 +6,9 @@ import datetime as dt
 import tempfile, os
 from sqlmodel import select
 import plotly.graph_objects as go
-from pandas.tseries.offsets import BDay
 from AlphaMachine_core.models import TickerPeriod
 from AlphaMachine_core.db import init_db, get_session
+from AlphaMachine_core.optimize_params import run_optimizer
 
 init_db() 
 
@@ -48,7 +48,7 @@ if pwd != st.secrets.get("APP_PW", ""):
 # -----------------------------------------------------------------------------
 # 3) Navigation-Switcher
 # -----------------------------------------------------------------------------
-page = st.sidebar.radio("🗂️ Seite wählen", ["Backtester", "Data Mgmt"], index=0)
+page = st.sidebar.radio("🗂️ Seite wählen",["Backtester", "Optimizer", "Data Mgmt"],index=0)
 
 # -----------------------------------------------------------------------------
 # 4) CSV-Loader (Session-Cache)
@@ -56,6 +56,30 @@ page = st.sidebar.radio("🗂️ Seite wählen", ["Backtester", "Data Mgmt"], in
 @st.cache_data(show_spinner="📂 CSV wird geladen…")
 def load_csv(file):
     return pd.read_csv(file, index_col=0, parse_dates=True)
+
+
+# -----------------------------------------------------------------------------
+# Load Prices
+# -----------------------------------------------------------------------------
+def load_price_df(month, sources, start_date, end_date):
+    dm = StockDataManager()
+    tickers = dm.get_tickers_for(month, sources)
+    raw = dm.get_price_data(
+        tickers,
+        start_date.strftime("%Y-%m-%d"),
+        end_date.strftime("%Y-%m-%d")
+    )
+    if not raw:
+        return pd.DataFrame()
+
+    return (
+        pd.DataFrame([r.model_dump() for r in raw])
+          .assign(date=lambda d: pd.to_datetime(d["trade_date"]))
+          .pivot(index="date", columns="ticker", values="close")
+          .sort_index()
+    )
+
+
 
 # =============================================================================
 # === Backtester-UI ===
@@ -144,10 +168,25 @@ def show_backtester_ui():
     fixed_cost = st.sidebar.number_input("Fixe Kosten pro Trade", 0.0, 100.0, CFG_FIXED_COST)
     var_cost   = st.sidebar.number_input("Variable Kosten (%)", 0.0, 1.0, CFG_VAR_COST*100) / 100.0
 
-    # — 8) Backtest auslösen —
-    run_btn = st.sidebar.button("Backtest starten 🚀")
-    if not run_btn:
-        st.info("Stelle alle Parameter in der Sidebar ein und klicke auf „Backtest starten“.")
+    # ### OPTIMIZER START – Sidebar‑Widgets  ###
+    st.sidebar.markdown("---")
+    st.sidebar.header("🚀 Optimizer")
+
+    kpi_weights = {
+        "Sharpe Ratio": st.sidebar.slider("Sharpe‑Gewicht", 0.0, 3.0, 1.0, 0.1),
+        "Ulcer Index":  -st.sidebar.slider("Ulcer‑Gewicht",  0.0, 3.0, 1.0, 0.1),
+        "CAGR (%)":     st.sidebar.slider("CAGR‑Gewicht",   0.0, 3.0, 1.0, 0.1),
+    }
+
+    opt_trials  = st.sidebar.number_input("Versuche", 10, 500, 50, 10)
+    
+    # --- Buttons -----------------------------------------------
+    run_opt_btn = st.sidebar.button("Optimizer starten 🚀")
+    run_btn     = st.sidebar.button("Backtest starten 🚀")
+
+    # Wenn *keiner* gedrückt wurde → zurück
+    if not run_btn and not run_opt_btn:
+        st.info("Stelle alle Parameter ein und klicke auf einen der Start‑Buttons.")
         return
 
     # — VALIDIERUNG —
@@ -693,11 +732,194 @@ def show_data_ui():
         st.warning(f"⚠️ {len(missing)} Handelstage ohne Daten:")
         st.write(missing.strftime("%Y-%m-%d").tolist())
 
- 
+# -----------------------------------------------------------------------------
+# Optimizer
+# -----------------------------------------------------------------------------
+def show_optimizer_ui():
+    st.header("⚙️ Hyperparameter‑Optimizer")
+
+    # ---------- Daten‑Selektion ------------------------------------
+    dm      = StockDataManager()
+    month   = st.selectbox("Start‑Monat (Universe)", dm.get_periods_distinct_months())
+    sources = st.multiselect("Quellen", ["Topweights", "SeekingAlpha", "TipRanks"], ["Topweights"])
+    col1, col2 = st.columns(2)
+    start_date = col1.date_input("Backtest‑Start", value=dt.date.today()-dt.timedelta(days=5*365))
+    end_date   = col2.date_input("Backtest‑Ende",  value=dt.date.today(), min_value=start_date)
+
+    price_df = load_price_df(month, sources, start_date, end_date)
+    if price_df.empty:
+        st.warning("⚠️ Keine Preisdaten gefunden.")
+        st.stop()
+
+    # ---------- Suchraum‑Editor ------------------------------------
+    PARAMS = {                         # label, *num‑range OR list
+        "num_stocks":         ("Anzahl Aktien", 5, 50, 1),
+        "window_days":        ("Lookback Tage", 50, 500, 10),
+        "min_weight":         ("Min‑Weight %", 0.0, 5.0, 0.5),
+        "max_weight":         ("Max‑Weight %", 5.0, 50.0, 1.0),
+        "force_equal_weight": ("Equal‑Weight", [False, True]),
+        "optimization_mode":  ("Mode", ["select-then-optimize", "optimize-subset"]),
+        "optimizer_method":   ("Optimizer", ["ledoit-wolf", "minvar", "hrp"]),
+        "cov_estimator":      ("Cov‑Estimator", ["ledoit-wolf", "constant-corr", "factor-model"]),
+    }
+
+    search_space = {}
+    with st.expander("🔧 Suchraum definieren", expanded=True):
+        for key, meta in PARAMS.items():
+            label = meta[0]
+            if not st.checkbox(f"{label} optimieren", key=f"chk_{key}"):
+                continue
+
+            if isinstance(meta[1], (int, float)):
+                lo, hi, step = meta[1:]
+                lo_val, hi_val = st.slider(label, lo, hi, (lo, hi), step=step, key=f"sl_{key}")
+                kind = "int" if isinstance(lo, int) else "float"
+                search_space[key] = (kind, lo_val, hi_val, step)
+            else:
+                opts = meta[1]
+                sel  = st.multiselect(f"{label} – Kandidaten", opts, opts, key=f"ms_{key}")
+                search_space[key] = ("categorical", sel)
+
+    st.info(f"🎯 Aktueller Suchraum:  {search_space}")
+
+    # ──────────────────────────────────────────────────────────────
+    # NEU ▸ Defaults, falls eine Variable NICHT optimiert wird
+    # ──────────────────────────────────────────────────────────────
+    base_num_stocks = None
+    if "num_stocks" not in search_space:
+        base_num_stocks = st.number_input(
+            "Anzahl Aktien (fix – wenn nicht optimiert)",
+            min_value=5, max_value=50, value=20, step=1, key="fix_num"
+        )
+
+    base_window_days = None
+    if "window_days" not in search_space:
+        base_window_days = st.slider(
+            "Lookback Tage (fix – wenn nicht optimiert)",
+            min_value=50, max_value=500, value=200, step=10, key="fix_win"
+        )
+
+    # ---------- KPI‑Gewichte & Trials --------------------------------
+    with st.expander("🎯 Objective‑Gewichte"):
+        kpi_weights = {
+            "Sharpe Ratio": st.slider("Sharpe", 0.0, 3.0, 1.0, 0.1),
+            "Ulcer Index": -st.slider("Ulcer Index", 0.0, 3.0, 1.0, 0.1),
+            "CAGR (%)":     st.slider("CAGR", 0.0, 3.0, 1.0, 0.1),
+        }
+
+    n_trials = st.number_input("Trials", 10, 500, 100, 10)
+
+    # ---------- Fixed Args (Engine) ----------------------------------
+    fixed_kwargs = dict(
+        start_balance = 100_000,
+        start_month   = month,
+        universe_mode = "static",
+        rebalance_frequency = "monthly",
+        custom_rebalance_months = 1,
+        enable_trading_costs = False,
+    )
+
+    # ▸ Pflicht‑Parameter nur setzen, wenn sie NICHT im Suchraum sind
+    if "num_stocks"  not in search_space:
+        fixed_kwargs["num_stocks"] = base_num_stocks
+    if "window_days" not in search_space:
+        fixed_kwargs["window_days"] = base_window_days
+
+    if st.button("🚀 Suche starten"):
+        study = run_optimizer(price_df, fixed_kwargs, search_space, kpi_weights, n_trials)
+        show_study_results(study, kpi_weights, price_df, fixed_kwargs)
+
+
+def show_study_results(
+    study,
+    kpi_weights: dict[str, float],
+    price_df: pd.DataFrame,
+    fixed_kwargs: dict,
+):
+    import re, pandas as pd
+    from AlphaMachine_core.engine import SharpeBacktestEngine
+
+    # -------  A) Trials‑DataFrame aufbereiten  -----------------------
+    df = study.trials_dataframe()
+
+    # Optuna ≥ 4 → MultiIndex flatten
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [
+            sec if main in ("params", "user_attrs") else main
+            for main, sec in df.columns.to_list()
+        ]
+
+    # Optuna ≤ 3 → user_attrs‑Dict aufspalten
+    if "user_attrs" in df.columns:
+        df = pd.concat(
+            [df.drop(columns=["user_attrs"]), df["user_attrs"].apply(pd.Series)],
+            axis=1
+        )
+
+    # Präfixe entfernen
+    df = df.rename(columns=lambda c: re.sub(r"^(param_|params_|user_attrs?_)", "", c))
+
+    kpi_map  = {"Sharpe Ratio": "Sharpe", "CAGR (%)": "CAGR", "Ulcer Index": "Ulcer Index"}
+    kpi_cols = [kpi_map[k] for k in kpi_weights if kpi_map[k] in df.columns]
+
+    # -------  B) TOP‑10‑Tabelle  -------------------------------------
+    cols_top = ["number", "value"] + kpi_cols + [
+        c for c in sorted(df.columns) if c not in ("number", "value", *kpi_cols)
+    ]
+
+    st.subheader("🏆 Top 10 Runs")
+    st.dataframe(
+        df[cols_top].sort_values("value", ascending=False).head(10).style.hide(axis="index"),
+        use_container_width=True,
+    )
+
+    # -------  C) Best‑Run erneut ausführen  --------------------------
+    best_params = study.best_params
+    kwargs      = {**fixed_kwargs, **best_params}
+
+    # falls Optuna diesen Pflicht‑Param nicht optimiert hat
+    if "num_stocks"  not in kwargs:
+        kwargs["num_stocks"]  = fixed_kwargs.get("num_stocks", 20)
+    if "window_days" not in kwargs:
+        kwargs["window_days"] = fixed_kwargs.get("window_days", 200)
+
+    eng = SharpeBacktestEngine(price_df, **kwargs)
+    eng.run_with_next_month_allocation()
+
+    # -------  D) Detail‑Tabellen  ------------------------------------
+    best = df.loc[df["value"].idxmax()]
+    param_cols = [c for c in best.index if c not in ("number", "value", *kpi_cols)]
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("### 🥇 Best‑Run KPIs")
+        st.table(best[kpi_cols].rename_axis("KPI").to_frame("Wert"))
+    with col2:
+        st.markdown("### ⚙️ Best‑Run Parameter")
+        st.table(best[param_cols].dropna().rename_axis("Parameter").to_frame("Wert"))
+
+    # ---------  E) Performance & Balance pro Jahr  -------------------
+    st.markdown("### 📈 Performance & Balance pro Jahr")
+
+    yearly_bal      = eng.portfolio_value.resample("YE").last()
+    yearly_ret_pct  = yearly_bal.pct_change().mul(100).round(1)   # <-- FIX
+
+    df_year = pd.DataFrame({
+        "Year":        yearly_bal.index.year,
+        "Return (%)":  yearly_ret_pct,
+        "Balance":     yearly_bal.round(0).astype(int),
+    }).dropna().astype({"Year": int}).reset_index(drop=True)
+
+    st.table(df_year)
+
+
+
 # -----------------------------------------------------------------------------
 # 5) Router
 # -----------------------------------------------------------------------------
 if page == "Backtester":
     show_backtester_ui()
+elif page == "Optimizer":
+    show_optimizer_ui()
 else:
     show_data_ui()
