@@ -109,7 +109,7 @@ def show_backtester_ui():
     # — 1) Quellen-Auswahl (DB + Defaults) —
     with get_session() as session:
         existing = session.exec(select(TickerPeriod.source)).all()
-    defaults = ["SeekingAlpha", "TipRanks", "Topweights"]
+    defaults = ["Topweights","TR20"]
     sources = st.sidebar.multiselect(
         "Datenquellen auswählen",
         options=sorted(set(existing + defaults)),
@@ -754,7 +754,7 @@ def show_optimizer_ui():
     month   = st.selectbox("Start-Monat (Universe)", dm.get_periods_distinct_months())
     with get_session() as session:
         existing = session.exec(select(TickerPeriod.source)).all()
-    defaults = ["Topweights", "SeekingAlpha", "TipRanks"]
+    defaults = ["Topweights", "TR20"]
     sources  = st.multiselect("Quellen", sorted(set(existing + defaults)), default=defaults)
     col1, col2 = st.columns(2)
     start_date = col1.date_input("Backtest-Start", value=dt.date.today() - dt.timedelta(days=5*365))
@@ -859,37 +859,69 @@ def show_study_results(study, kpi_weights, price_df, fixed_kwargs):
     df = df.rename(columns=lambda c: re.sub(r"^(param_|params_|user_attrs?_)", "", c))
 
     # KPI-Spalten ermitteln
-    kpi_map  = {"Sharpe Ratio": "Sharpe", "CAGR (%)": "CAGR", "Ulcer Index": "Ulcer Index"}
-    kpis     = [kpi_map[k] for k in kpi_weights if kpi_map[k] in df.columns]
+    kpi_map = {"Sharpe Ratio": "Sharpe", "CAGR (%)": "CAGR", "Ulcer Index": "Ulcer Index"}
+    kpis    = [kpi_map[k] for k in kpi_weights if kpi_map[k] in df.columns]
 
-    # ------- B) Top 10 Runs ----------------------------------------
+    # ------- B) Top 50 Runs ----------------------------------------
     cols_top = ["number", "value"] + kpis + [
         c for c in sorted(df.columns) if c not in ("number", "value", *kpis)
     ]
-    st.subheader("🏆 Top 10 Runs")
-    st.dataframe(
-        df[cols_top]
-          .sort_values("value", ascending=False)
-          .head(10)
-          .style.hide(axis="index"),
-        use_container_width=True
-    )
+    top_df = df[cols_top].sort_values("value", ascending=False).head(50)
+
+    st.subheader("🏆 Top 50 Runs")
+    st.dataframe(top_df.style.hide(axis="index"), use_container_width=True)
+
+    # Auswahl eines Runs für Backtest
+    run_numbers = top_df["number"].tolist()
+    selected = st.selectbox("Wähle Run-Nummer zum Backtesten", run_numbers)
+    run_btn = st.button("🔄 Ausgewählten Run backtesten", key="run_selected_btn")
+    if run_btn:
+        # Parameter ins Session-State schreiben
+        sel_row = df[df["number"] == selected].iloc[0]
+        params = {c: sel_row[c] for c in sel_row.index if c not in ("number","value",*kpis)}
+        for k, v in params.items():
+            st.session_state[f"opt_{k}"] = v
+        # Merke den gewählten Run
+        st.session_state.selected_run = selected
+        st.success(f"Run {selected} für Backtest ausgewählt und Parameter gespeichert.")
+
+    # Wenn ein Run gewählt wurde, durchführen
+    if st.session_state.get('selected_run', None) is not None:
+        sel_num = st.session_state.selected_run
+        sel_row = df[df["number"] == sel_num].iloc[0]
+        params = {c: sel_row[c] for c in sel_row.index if c not in ("number","value",*kpis)}
+        run_kwargs = {**fixed_kwargs, **params}
+        if "num_stocks" not in run_kwargs:
+            run_kwargs["num_stocks"] = fixed_kwargs.get("num_stocks")
+        if "window_days" not in run_kwargs:
+            run_kwargs["window_days"] = fixed_kwargs.get("window_days")
+
+        eng_sel = SharpeBacktestEngine(price_df, **run_kwargs)
+        eng_sel.run_with_next_month_allocation()
+
+        st.subheader(f"🔍 Backtest-Ergebnisse für Run {sel_num}")
+        st.markdown("---")
+        st.subheader("🔍 KPI-Übersicht des gewählten Runs")
+        if not eng_sel.performance_metrics.empty:
+            st.dataframe(eng_sel.performance_metrics, hide_index=True, use_container_width=True)
+        st.markdown("---")
+        st.subheader("📈 Portfolio-Verlauf des gewählten Runs")
+        if not eng_sel.portfolio_value.empty:
+            st.line_chart(eng_sel.portfolio_value)
 
     # ------- C) Best-Run erneut ausführen --------------------------
     best_params = study.best_params
     run_kwargs  = {**fixed_kwargs, **best_params}
-
-    # Pflicht-Parameter ergänzen, falls nicht optimiert
-    if "num_stocks"  not in run_kwargs:
-        run_kwargs["num_stocks"]  = fixed_kwargs["num_stocks"]
+    if "num_stocks" not in run_kwargs:
+        run_kwargs["num_stocks"] = fixed_kwargs.get("num_stocks")
     if "window_days" not in run_kwargs:
-        run_kwargs["window_days"] = fixed_kwargs["window_days"]
+        run_kwargs["window_days"] = fixed_kwargs.get("window_days")
 
-    eng = SharpeBacktestEngine(price_df, **run_kwargs)
-    eng.run_with_next_month_allocation()
+    eng_best = SharpeBacktestEngine(price_df, **run_kwargs)
+    eng_best.run_with_next_month_allocation()
 
     # ------- D) Best-Run KPIs & Parameter -------------------------
-    best = df.loc[df["value"].idxmax()]
+    best = top_df.iloc[0]
     param_cols = [c for c in best.index if c not in ("number", "value", *kpis)]
 
     col1, col2 = st.columns(2)
@@ -910,7 +942,7 @@ def show_study_results(study, kpi_weights, price_df, fixed_kwargs):
         )
 
     # ------- E) Performance & Balance pro Jahr --------------------
-    yearly_bal     = eng.portfolio_value.resample("YE").last()
+    yearly_bal     = eng_best.portfolio_value.resample("YE").last()
     yearly_ret_pct = yearly_bal.pct_change().mul(100).round(1)
 
     df_year = pd.DataFrame({
@@ -918,13 +950,10 @@ def show_study_results(study, kpi_weights, price_df, fixed_kwargs):
         "Return (%)":  yearly_ret_pct,
         "Balance":     yearly_bal.round(0).astype(int),
     })
-
-    # Return NaN in der ersten Zeile durch leeren String ersetzen
     df_year["Return (%)"] = df_year["Return (%)"].fillna("")
 
-    st.subheader("📈 Performance & Balance pro Jahr")
+    st.subheader("📈 Performance & Balance pro Jahr des Best-Runs")
     st.table(df_year.astype({"Year": int}).reset_index(drop=True))
-
 
 
 
