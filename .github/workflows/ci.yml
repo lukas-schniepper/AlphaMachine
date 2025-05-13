@@ -1,25 +1,25 @@
-name: CI  # Name, der im Actions-Tab erscheint
+name: CI                                # Name, der im Actions-Tab erscheint
 on:
-  push:           # bei jedem Push prüfen …
-    branches: [main, feature/**]   # … auf main & allen feature-Branches
-  pull_request:   # plus alle PRs
+  push:                                 # bei jedem Push prüfen …
+    branches: [main, feature/**]        # … auf main & allen feature-Branches
+  pull_request:                         # plus alle PRs
     branches: [main]
 
 jobs:
   test:
-    runs-on: ubuntu-latest          # GitHub-gehosteter Runner
+    runs-on: ubuntu-latest              # GitHub-gehosteter Runner
     steps:
       # 1. Code auschecken
       - uses: actions/checkout@v4
         with:
-          submodules: false         # true, falls du Submodules nutzt
+          submodules: false             # true, falls du Submodules nutzt
 
       # 2. Python-Version festlegen
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # 3. Cache für Poetry-Packages (schneller Builds)
+      # 3. Cache für Poetry-Packages (schnellere Builds)
       - name: Cache Poetry virtualenv
         uses: actions/cache@v4
         with:
@@ -32,10 +32,13 @@ jobs:
       - name: Install dependencies
         run: |
           pip install poetry
-          poetry install --no-root
+          poetry install --no-root   # installiert main- & dev-Dependencies
 
-      # 5. Lint + Tests
+      # 5a. Ruff-Lint
+      - name: Ruff lint
         run: poetry run ruff check . --output-format github
+
+      # 5b. Unit-Tests
       - name: PyTest
         run: poetry run pytest -q
 
