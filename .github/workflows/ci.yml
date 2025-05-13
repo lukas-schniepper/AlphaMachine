@@ -36,7 +36,7 @@ jobs:
 
       # 5. Lint + Tests
       - name: Ruff lint
-        run: poetry run ruff alphamachine  # Verzeichnis anpassen
+        run: poetry run ruff check alphamachine --output-format github
       - name: PyTest
         run: poetry run pytest -q
 
