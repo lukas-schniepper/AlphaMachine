@@ -6,7 +6,8 @@ Optuna‑Wrapper für AlphaMachine‑Backtests
 """
 
 from __future__ import annotations
-import optuna, pandas as pd
+import optuna
+import pandas as pd
 from AlphaMachine_core.engine import SharpeBacktestEngine
 
 

@@ -1,6 +1,5 @@
 # AlphaMachine_core/db.py
 
-import os
 from sqlmodel import create_engine, SQLModel, Session
 from AlphaMachine_core.config import DATABASE_URL
 

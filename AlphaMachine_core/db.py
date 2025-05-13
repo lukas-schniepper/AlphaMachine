@@ -5,7 +5,6 @@ from sqlalchemy.exc import OperationalError
 from AlphaMachine_core.config import DATABASE_URL
 
 #  → Damit die Models registriert werden:
-import AlphaMachine_core.models  
 
 engine = create_engine(
     DATABASE_URL,

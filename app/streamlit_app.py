@@ -4,7 +4,8 @@ from pandas.tseries.holiday import USFederalHolidayCalendar
 from pandas.tseries.offsets import CustomBusinessDay
 import datetime as dt
 from pandas.tseries.offsets import BDay
-import tempfile, os
+import tempfile
+import os
 from sqlmodel import select
 import plotly.graph_objects as go
 from AlphaMachine_core.models import TickerPeriod
@@ -371,7 +372,7 @@ def show_backtester_ui():
             monthly_balance.index.name = "Date"
 
             # 3) Monatsrenditen in Prozent
-            monthly_returns = monthly_prices.pct_change().dropna() * 100
+            monthly_returns = monthly_prices.pct_change().dropna(how="all") * 100
 
             # 4) Portfolio-Monatsrendite aus engine.monthly_performance
             port_rets = (
@@ -423,7 +424,7 @@ def show_backtester_ui():
             yearly_balance.index.name = "Date"
 
             # 3) Jahres-Renditen in Prozent für alle Ticker
-            yearly_returns = yearly_prices.pct_change().dropna() * 100
+            yearly_returns  = yearly_prices.pct_change().dropna(how="all") * 100
 
             # 4) Portfolio-Jahresrendite
             port_year_rets = yearly_balance.pct_change().dropna() * 100
@@ -771,9 +772,8 @@ def show_optimizer_ui():
     full_idx = pd.date_range(start_date, end_date, freq=BDay())
     price_df = (
         price_df
-        .reindex(full_idx)             # alle Handelstage
-        .fillna(method="ffill")        # forward-fill
-        .fillna(method="bfill")        # BACK-fill für ganz am Anfang fehlende Kurse
+        .reindex(full_idx)
+        .ffill()  # forward-fill – kein bfill mehr
     )
 
     # ---------- Suchraum-Editor ------------------------------------
