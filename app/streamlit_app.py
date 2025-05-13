@@ -7,13 +7,11 @@ from pandas.tseries.offsets import BDay
 import tempfile
 import os
 from sqlmodel import select
+import re
 import plotly.graph_objects as go
 from AlphaMachine_core.models import TickerPeriod
 from AlphaMachine_core.db import init_db, get_session
 from AlphaMachine_core.optimize_params import run_optimizer
-
-init_db() 
-
 from AlphaMachine_core.engine import SharpeBacktestEngine
 from AlphaMachine_core.reporting_no_sparklines import export_results_to_excel
 from AlphaMachine_core.data_manager import StockDataManager
@@ -32,7 +30,7 @@ from AlphaMachine_core.config import (
     FORCE_EQUAL_WEIGHT as CFG_FORCE_EQ,
 )
 
-
+init_db() 
 
 # -----------------------------------------------------------------------------
 # 1) Page-Config
@@ -175,13 +173,13 @@ def show_backtester_ui():
     st.sidebar.markdown("---")
     st.sidebar.header("🚀 Optimizer")
 
-    kpi_weights = {
+    _kpi_weights = {
         "Sharpe Ratio": st.sidebar.slider("Sharpe‑Gewicht", 0.0, 3.0, 1.0, 0.1),
         "Ulcer Index":  -st.sidebar.slider("Ulcer‑Gewicht",  0.0, 3.0, 1.0, 0.1),
         "CAGR (%)":     st.sidebar.slider("CAGR‑Gewicht",   0.0, 3.0, 1.0, 0.1),
     }
 
-    opt_trials  = st.sidebar.number_input("Versuche", 10, 500, 50, 10)
+    _opt_trials  = st.sidebar.number_input("Versuche", 10, 500, 50, 10)
     
     # --- Buttons -----------------------------------------------
     run_opt_btn = st.sidebar.button("Optimizer starten 🚀")
@@ -194,9 +192,11 @@ def show_backtester_ui():
 
     # — VALIDIERUNG —
     if not sources:
-        st.error("Bitte mindestens eine Quelle auswählen."); return
+        st.error("Bitte mindestens eine Quelle auswählen.") 
+        return
     if not month:
-        st.error("Bitte einen Monat auswählen."); return
+        st.error("Bitte einen Monat auswählen.")
+        return
 
     # — 9) Ticker + PriceData laden + Pivot … und Backtest laufen lassen —
     tickers = dm.get_tickers_for(month, sources)
@@ -205,10 +205,11 @@ def show_backtester_ui():
     #st.write(f"🔎 got {len(tickers)} tickers:", tickers)
 
     if not tickers:
-        st.error("Keine Ticker für diese Auswahl."); return
+        st.error("Keine Ticker für diese Auswahl.")
+        return
 
     end = dt.date.today()
-    history_start = (
+    _history_start = (
         (end - dt.timedelta(days=window_days)).strftime("%Y-%m-%d")
         if mode.startswith("statisch")
         else f"{month}-01"
@@ -228,7 +229,8 @@ def show_backtester_ui():
     #------------------------
 
     if not raw:
-        st.error("Keine Preisdaten gefunden."); return
+        st.error("Keine Preisdaten gefunden.")
+        return
 
     price_df = (
         pd.DataFrame([r.model_dump() for r in raw])
@@ -834,10 +836,7 @@ def show_optimizer_ui():
         show_study_results(study, kpi_weights, price_df, base_kwargs)
 
 def show_study_results(study, kpi_weights, price_df, fixed_kwargs):
-    import re
-    import pandas as pd
-    from AlphaMachine_core.engine import SharpeBacktestEngine
-
+    
     # ------- A) Trials-DataFrame aufbereiten -----------------------
     df = study.trials_dataframe()
 
