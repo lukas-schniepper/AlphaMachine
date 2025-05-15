@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from enum import Enum
 import pandas as pd
+import numpy as np
 
 class Mode(str, Enum):
     RISK_OFF = "risk_off"
