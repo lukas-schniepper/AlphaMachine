@@ -230,7 +230,7 @@ def create_drawdown_sheet(engine, writer, top_n=10):
     start = trough = end = None
     peak_val = trough_val = None
 
-    for date, row in df.iterrows():
+    for trade_date, row in df.iterrows():
         if not in_drawdown and row["Drawdown"] < 0:
             in_drawdown = True
             start = date

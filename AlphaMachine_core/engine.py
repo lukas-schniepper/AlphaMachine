@@ -12,12 +12,6 @@ from AlphaMachine_core.config import (
     MIN_WEIGHT,
     MAX_WEIGHT,
     REBALANCE_FREQUENCY,
-    MAX_TURNOVER,
-    MAX_SECTOR_WEIGHT,
-    MIN_CAGR,
-    USE_BALANCED_OBJECTIVE,
-    USE_BENCHMARK,
-    BENCHMARK_TICKERS,
     OPTIMIZE_WEIGHTS,
     OPTIMIZER_METHOD,
     COV_ESTIMATOR,
@@ -164,10 +158,20 @@ class SharpeBacktestEngine:
 
     def run_with_next_month_allocation(self, top_universe_size: int = 100):
 
-        # now compute returns on the (possibly filtered) data
-        returns = self.price_data.pct_change().dropna()
+        """
+        Führt den Backtest aus, erlaubt bei jedem Rebalance auch weniger als
+        self.num_stocks verfügbare Ticker (setzt n_stocks = available).
+        """
 
+        # 1) Renditen berechnen und vollständig leere Zeilen entfernen
+        returns = self.price_data.pct_change().dropna(how="all")
 
+        # **NEU**: Alle verbliebenen NaNs durch 0 ersetzen,
+        # damit LedoitWolf & Co. sauber rechnen können
+        returns = returns.fillna(0)
+  
+
+        # 2) Rebalance-Zeitplan
         rebalance_schedule = build_rebalance_schedule(
             self.price_data,
             frequency=self.rebalance_freq,
@@ -175,11 +179,13 @@ class SharpeBacktestEngine:
         )
 
         # DEBUG
-        print("🗓️ Rebalance Schedule:", [e["rebalance_date"].strftime("%Y-%m-%d") for e in rebalance_schedule])
+        print("🗓️ Rebalance Schedule:",
+            [e["rebalance_date"].strftime("%Y-%m-%d") for e in rebalance_schedule])
         print("▶️ schedule Länge:", len(rebalance_schedule))
-        print("⚙️ custom_rebalance_months =", self.custom_rebalance_months," | rebalance_freq =", self.rebalance_freq)
-        # ------------------
+        print("⚙️ custom_rebalance_months =", self.custom_rebalance_months,
+            "| rebalance_freq =", self.rebalance_freq)
 
+        # Erwartete Monate für späteres Reporting
         expected_months = pd.date_range(
             start=self.price_data.index.min(),
             end=self.price_data.index.max(),
@@ -199,14 +205,25 @@ class SharpeBacktestEngine:
             start_date = entry["start_date"]
             end_date = entry["end_date"]
             window_start = date - pd.Timedelta(days=self.window_days)
-            sub_returns = returns.loc[window_start:date].dropna(axis=1, how="all")
 
-            if sub_returns.shape[1] < self.num_stocks:
-                print(
-                    f"⚠️ {date.date()}: Not enough tickers ({sub_returns.shape[1]}). Skipping rebalance."
-                )
+            # Renditen im Lookback-Fenster, entferne Ticker ohne Daten in diesem Fenster
+            sub_returns = returns.loc[window_start:date].dropna(axis=1, how="all")
+            available = sub_returns.shape[1]
+
+            # Wenn gar keine Ticker da sind, überspringen
+            if available == 0:
+                print(f"⚠️ {date.date()}: Kein einziger Ticker verfügbar. Skipping rebalance.")
                 continue
 
+            # Auf verfügbare Anzahl runterrechnen
+            n_stocks = min(self.num_stocks, available)
+            if available < self.num_stocks:
+                print(f"⚠️ {date.date()}: Nur {available} Ticker verfügbar, verwende {n_stocks}.")
+                self.log_lines.append(
+                    f"⚠️ {date.date()}: Only {available} tickers available, using {n_stocks} instead of {self.num_stocks}"
+                )
+
+            # Pre-Selection nach Sharpe
             top_universe = select_top_sharpe_tickers(sub_returns, top_universe_size)
             filtered_returns = sub_returns[top_universe]
 
@@ -217,23 +234,24 @@ class SharpeBacktestEngine:
                 f" | CovEstimator: {self.cov_estimator}"
             )
 
+            # Gewicht-Optimierung oder Subset-Optimierung
             if self.optimization_mode == "select-then-optimize":
-                top_tickers = filtered_returns.columns[: self.num_stocks]
-                filtered_top_returns = filtered_returns[top_tickers]
-
+                # Variante A: zuerst Top N, dann Gewichte optimieren
+                top_tickers = filtered_returns.columns[:n_stocks]
+                filtered_top = filtered_returns[top_tickers]
                 weights_series = optimize_portfolio(
-                    returns=filtered_top_returns,
+                    returns=filtered_top,
                     method=self.optimizer_method,
                     cov_estimator=self.cov_estimator,
                     min_weight=self.min_weight,
                     max_weight=self.max_weight,
                     force_equal_weight=self.force_equal_weight,
                     debug_label="A - Optimizer only weight",
-                    num_stocks=self.num_stocks,
+                    num_stocks=n_stocks,
                 )
-
-            elif self.optimization_mode == "optimize-subset":
-                weights_series = optimize_portfolio(
+            else:
+                # Variante B: gesamte Menge gewichten, dann Top N nach Gewicht auswählen
+                weights_full = optimize_portfolio(
                     returns=filtered_returns,
                     method=self.optimizer_method,
                     cov_estimator=self.cov_estimator,
@@ -241,26 +259,23 @@ class SharpeBacktestEngine:
                     max_weight=self.max_weight,
                     force_equal_weight=self.force_equal_weight,
                     debug_label="B - Optimizer selects & weights",
-                    num_stocks=self.num_stocks,
+                    num_stocks=n_stocks,
                 )
-                top_tickers = weights_series.index.tolist()
+                top_tickers = weights_full.sort_values(ascending=False).head(n_stocks).index.tolist()
+                weights_series = weights_full.loc[top_tickers]
 
-            else:
-                raise ValueError(
-                    f"❌ Unbekannter Optimierungsmodus: {self.optimization_mode}"
-                )
+            # Log-Detail
+            self.selection_details.append({
+                "Rebalance Date":        date.strftime("%Y-%m-%d"),
+                "Actual Rebalance Day":  date.strftime("%Y-%m-%d"),
+                "Top Universe Size":     len(top_universe),
+                "Optimization Method":   self.optimizer_method,
+                "Cov Estimator":         self.cov_estimator,
+                "Selected Tickers":      ", ".join(top_tickers),
+                "Rebalance Frequency":   self.rebalance_freq,
+            })
 
-            selection_detail = {
-                "Rebalance Date": date.strftime("%Y-%m-%d"),
-                "Actual Rebalance Day": date.strftime("%Y-%m-%d"),
-                "Top Universe Size": len(top_universe),
-                "Optimization Method": self.optimizer_method,
-                "Cov Estimator": self.cov_estimator,
-                "Selected Tickers": ", ".join(top_tickers),
-                "Rebalance Frequency": self.rebalance_freq,
-            }
-            self.selection_details.append(selection_detail)
-
+            # Positions anlegen
             weights = weights_series.values
             current_positions, new_allocs = allocate_positions(
                 self.price_data,
@@ -274,154 +289,120 @@ class SharpeBacktestEngine:
                 variable_cost_pct=self.variable_cost_pct,
             )
 
-            # Trading-Kosten aus Allokationen extrahieren
-            rebalance_costs = 0
-            for alloc in new_allocs:
-                if "Trading Costs" in alloc:
-                    rebalance_costs += alloc["Trading Costs"]
-
+            # Trading-Kosten summieren
+            rebalance_costs = sum(alloc.get("Trading Costs", 0) for alloc in new_allocs)
             self.total_trading_costs += rebalance_costs
-
             monthly_allocations.extend(new_allocs)
 
-            log_msg = f"🔁 {date.date()}: Rebalanced for {start_date.date()} - {end_date.date()} | {len(current_positions)} positions | Trading Costs: {rebalance_costs:.2f}"
+            log_msg = (f"🔁 {date.date()}: Rebalanced for "
+                    f"{start_date.date()} - {end_date.date()} | "
+                    f"{len(current_positions)} positions | "
+                    f"Trading Costs: {rebalance_costs:.2f}")
             print(log_msg)
             self.log_lines.append(log_msg)
 
+            # Daily-Portfolio-Werte
             for day in self.price_data.loc[start_date:end_date].index:
                 daily_value = 0
                 for ticker, pos in current_positions.items():
-                    if ticker in self.price_data.columns:
-                        price = self.price_data.loc[day, ticker]
-                        if not np.isnan(price):
-                            value = pos["shares"] * price
-                            daily_value += value
-                            daily_data.append(
-                                {
-                                    "Date": day.date(),
-                                    "Ticker": ticker,
-                                    "Close Price": price,
-                                    "Shares": pos["shares"],
-                                    "Allocated Amount": value,
-                                    "Allocated Percentage (%)": pos["weight"] * 100,
-                                    "Total Portfolio Value": daily_value,
-                                    "Is_Rebalance_Day": day == start_date,
-                                    "Trading Costs": (
-                                        pos.get("trading_costs", 0)
-                                        if day == start_date
-                                        else 0
-                                    ),
-                                }
-                            )
+                    price = self.price_data.at[day, ticker] if ticker in self.price_data.columns else np.nan
+                    if not np.isnan(price):
+                        value = pos["shares"] * price
+                        daily_value += value
+                        daily_data.append({
+                            "Date":                 day.date(),
+                            "Ticker":               ticker,
+                            "Close Price":          price,
+                            "Shares":               pos["shares"],
+                            "Allocated Amount":     value,
+                            "Allocated Percentage (%)": pos["weight"]*100,
+                            "Total Portfolio Value":    daily_value,
+                            "Is_Rebalance_Day":         day == start_date,
+                            "Trading Costs":            pos.get("trading_costs",0) if day==start_date else 0,
+                        })
                 portfolio_values[day] = daily_value
                 balance = daily_value
 
-        self.portfolio_value = portfolio_values.dropna()
-        self.daily_df = pd.DataFrame(daily_data)
+        # Ergebnis-DataFrames füllen
+        self.portfolio_value     = portfolio_values.dropna()
+        self.daily_df            = pd.DataFrame(daily_data)
         self.monthly_allocations = pd.DataFrame(monthly_allocations)
 
-        # Füge Trading-Kosten zur Performance-Zusammenfassung hinzu
-        selection_detail = {
-            "Rebalance Date": "SUMMARY",
-            "Actual Rebalance Day": "SUMMARY",
-            "Top Universe Size": 0,
+        # SUMMARY-Zeile für Trading-Kosten
+        self.selection_details.append({
+            "Rebalance Date":      "SUMMARY",
+            "Actual Rebalance Day":"SUMMARY",
+            "Top Universe Size":   0,
             "Optimization Method": "N/A",
-            "Cov Estimator": "N/A",
-            "Selected Tickers": "N/A",
+            "Cov Estimator":       "N/A",
+            "Selected Tickers":    "N/A",
             "Rebalance Frequency": self.rebalance_freq,
             "Total Trading Costs": self.total_trading_costs,
-            "Trading Costs %": (self.total_trading_costs / self.start_balance) * 100,
-        }
-        self.selection_details.append(selection_detail)
+            "Trading Costs %":     (self.total_trading_costs/self.start_balance)*100,
+        })
 
+        # Fehlende Monate protokollieren
         actual_months = (
-            pd.to_datetime(
-                [
-                    d["Rebalance Date"]
-                    for d in self.selection_details
-                    if d["Rebalance Date"] != "SUMMARY"
-                ]
-            )
-            .to_series()
-            .dt.to_period("M")
-            .drop_duplicates()
+            pd.to_datetime([d["Rebalance Date"] for d in self.selection_details if d["Rebalance Date"]!="SUMMARY"])
+            .to_series().dt.to_period("M").drop_duplicates()
         )
-
         self.missing_months = [
             m.strftime("%Y-%m")
             for m in expected_months
             if m not in actual_months.values
         ]
-
         if self.missing_months:
             log = "⚠️ Rebalance fehlt für folgende Monate: " + ", ".join(self.missing_months)
             print(log)
             self.log_lines.append(log)
 
-        # — Next-Month-Auswahl berechnen ———————————————————————————————
+        # — Next-Month Allocation analog berechnen (kürzere Logik) —
         last_date    = self.price_data.index.max()
         window_start = last_date - pd.Timedelta(days=self.window_days)
         sub_returns  = returns.loc[window_start:last_date].dropna(axis=1, how="all")
-
-        if sub_returns.shape[1] == 0:
+        available_nm = sub_returns.shape[1]
+        if available_nm == 0:
             self.next_month_tickers = []
             self.next_month_weights = pd.Series(dtype=float)
-            self._calculate_performance_metrics()
-            return self.portfolio_value
-
-        if self.optimization_mode == "select-then-optimize":
-            # Variante A: Sharpe zuerst, dann Top N
-            # 1) Sharpe-Pre-Screening
-            top_sharpe    = select_top_sharpe_tickers(sub_returns, top_universe_size)
-            candidates    = list(top_sharpe[: self.num_stocks])
-            # 2) Jetzt wirklich optimieren (so wie im Backtest)
-            weights_series = optimize_portfolio(
-                returns=sub_returns[candidates],
-                method=self.optimizer_method,
-                cov_estimator=self.cov_estimator,
-                min_weight=self.min_weight,
-                max_weight=self.max_weight,
-                force_equal_weight=self.force_equal_weight,
-                debug_label="A - Optimizer only weight",
-                num_stocks=self.num_stocks,
-            )
-            # alle Ticker mit >0 Gewicht
-            next_universe       = weights_series[weights_series>0].index.tolist()
-            self.next_month_weights = weights_series.loc[next_universe]
-
-        elif self.optimization_mode == "optimize-subset":
-            # Variante B: das ganze Universum gewichten und dann Top N nach Gewicht auswählen
-            # debug_label ohne "B - Optimizer selects & weights", damit keine interne Pre-Selection
-            weights_full = optimize_portfolio(
-                returns=sub_returns,
-                method=self.optimizer_method,
-                cov_estimator=self.cov_estimator,
-                min_weight=self.min_weight,
-                max_weight=self.max_weight,
-                force_equal_weight=self.force_equal_weight,
-                debug_label="B - NextMonth full optimize",  # kein Pre-Select
-                num_stocks=self.num_stocks,
-            )
-            # jetzt die Top N Ticker nach Gewicht
-            next_universe = weights_full.sort_values(ascending=False).head(self.num_stocks).index.tolist()
-            self.next_month_weights = weights_full.loc[next_universe]
-
         else:
-            # Fallback: keine Auswahl
-            next_universe = []
-            self.next_month_weights = pd.Series(dtype=float)
+            n_nm = min(self.num_stocks, available_nm)
+            if self.optimization_mode == "select-then-optimize":
+                top_sharpe = select_top_sharpe_tickers(sub_returns, top_universe_size)[:n_nm]
+                weights_nm = optimize_portfolio(
+                    returns=sub_returns[top_sharpe],
+                    method=self.optimizer_method,
+                    cov_estimator=self.cov_estimator,
+                    min_weight=self.min_weight,
+                    max_weight=self.max_weight,
+                    force_equal_weight=self.force_equal_weight,
+                    debug_label="NextMonth A",
+                    num_stocks=n_nm,
+                )
+            else:
+                wf = optimize_portfolio(
+                    returns=sub_returns,
+                    method=self.optimizer_method,
+                    cov_estimator=self.cov_estimator,
+                    min_weight=self.min_weight,
+                    max_weight=self.max_weight,
+                    force_equal_weight=self.force_equal_weight,
+                    debug_label="NextMonth B",
+                    num_stocks=n_nm,
+                )
+                top_sharpe = wf.sort_values(ascending=False).head(n_nm).index.tolist()
+                weights_nm = wf.loc[top_sharpe]
 
-        # Wenn Du im statischen Universe bist, weiterhin beschränken
-        if self.universe_mode == "static":
-            next_universe = [t for t in next_universe if t in self.price_data.columns]
-            self.next_month_weights = self.next_month_weights.reindex(next_universe).fillna(0)
+            # im statischen Modus auf originale tickers einschränken
+            if self.universe_mode == "static":
+                top_sharpe = [t for t in top_sharpe if t in self.price_data.columns]
+                weights_nm = weights_nm.reindex(top_sharpe).fillna(0)
 
-        # Zum Abschluss
-        self.next_month_tickers = next_universe
+            self.next_month_tickers = top_sharpe
+            self.next_month_weights = weights_nm
 
-        print("🔮 Next-Month-Universe:", self.next_month_tickers)
-
+        print("🔮 Next-Month-Universe:", getattr(self, "next_month_tickers", []))
         self._calculate_performance_metrics()
+
         return self.portfolio_value
 
     def _calculate_performance_metrics(self):

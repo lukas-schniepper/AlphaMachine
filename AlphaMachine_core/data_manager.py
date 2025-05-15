@@ -1,4 +1,3 @@
-import os
 import time
 import datetime as dt
 import yfinance as yf
