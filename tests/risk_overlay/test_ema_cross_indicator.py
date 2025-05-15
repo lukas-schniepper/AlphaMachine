@@ -1,5 +1,4 @@
 import pandas as pd
-import numpy as np
 from AlphaMachine_core.risk_overlay.indicators.ema_cross import EMACrossIndicator
 
 def test_ema_cross_score_positive_when_fast_above_slow():
