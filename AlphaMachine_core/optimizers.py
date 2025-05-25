@@ -93,12 +93,12 @@ def optimize_portfolio(
     num_stocks: int = None,
 ) -> pd.Series:
 
-    print("⚙️ Optimizer Call")
-    print(f"   → Variante: {debug_label}")
-    print(f"   → Methode: {method}")
-    print(f"   → Kovarianzschätzer: {cov_estimator}")
-    print(f"   → Force Equal Weight: {force_equal_weight}")
-    print(f"   → Tickers: {len(returns.columns)} → {list(returns.columns[:5])}...")
+    #print("⚙️ Optimizer Call")
+    #print(f"   → Variante: {debug_label}")
+    #print(f"   → Methode: {method}")
+    #print(f"   → Kovarianzschätzer: {cov_estimator}")
+    #print(f"   → Force Equal Weight: {force_equal_weight}")
+    #print(f"   → Tickers: {len(returns.columns)} → {list(returns.columns[:5])}...")
 
     tickers = returns.columns
 

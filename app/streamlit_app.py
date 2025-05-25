@@ -61,23 +61,28 @@ def load_csv(file):
 # -----------------------------------------------------------------------------
 # Load Prices
 # -----------------------------------------------------------------------------
-def load_price_df(month, sources, start_date, end_date):
-    dm = StockDataManager()
-    tickers = dm.get_tickers_for(month, sources)
+def load_price_df(dm, tickers, start_date, end_date, window_days, lookback_margin_days=20):
+    # Berechne das Lookback in HANDELSTAGEN!
+    price_start = pd.to_datetime(start_date) - BDay(window_days + lookback_margin_days)
+    price_start = price_start.date()  # für get_price_data als String
     raw = dm.get_price_data(
         tickers,
-        start_date.strftime("%Y-%m-%d"),
+        price_start.strftime("%Y-%m-%d"),
         end_date.strftime("%Y-%m-%d")
     )
     if not raw:
-        return pd.DataFrame()
+        return pd.DataFrame(), price_start
 
-    return (
+    price_df = (
         pd.DataFrame([r.model_dump() for r in raw])
           .assign(date=lambda d: pd.to_datetime(d["trade_date"]))
           .pivot(index="date", columns="ticker", values="close")
           .sort_index()
     )
+    full_idx = pd.date_range(price_start, end_date, freq=BDay())
+    price_df = price_df.reindex(full_idx).ffill()
+    return price_df, price_start
+
 
 
 
@@ -88,7 +93,7 @@ def show_backtester_ui():
     st.sidebar.header("📊 Backtest-Parameter")
     dm = StockDataManager()
 
-    # — 0) Backtest-Periode festlegen
+    # 0) Backtest-Periode festlegen
     col1, col2 = st.sidebar.columns(2)
     start_date = col1.date_input(
         "Backtest-Startdatum",
@@ -100,12 +105,11 @@ def show_backtester_ui():
         value=dt.date.today(),
         min_value=start_date
     )
-    # Jetzt, wo beide existieren, validieren
     if start_date >= end_date:
         st.sidebar.error("Startdatum muss vor dem Enddatum liegen.")
         return
 
-    # — 1) Quellen-Auswahl (DB + Defaults) —
+    # 1) Quellen-Auswahl (DB + Defaults)
     with get_session() as session:
         existing = session.exec(select(TickerPeriod.source)).all()
     defaults = ["Topweights","TR20"]
@@ -115,22 +119,22 @@ def show_backtester_ui():
         default=["Topweights"]
     )
 
-    # — 2) Monat wählen —
+    # 2) Monat wählen
     months = dm.get_periods_distinct_months()
     month  = st.sidebar.selectbox("Periode wählen (YYYY-MM)", months)
 
-    # — 3) Modus: statisch vs. dynamisch —
+    # 3) Modus: statisch vs. dynamisch
     mode = st.sidebar.radio(
         "Ticker-Universe",
         ["statisch (gesamte Periode)", "dynamisch (monatlich)"]
     )
 
-    # — 4) Lookback Days (Backtest-Fenster) —
+    # 4) Lookback Days (Backtest-Fenster)
     window_days = st.sidebar.slider(
         "Lookback Days", 
         min_value=50,
         max_value=500,
-        value=CFG_WINDOW,   # comes from your config
+        value=CFG_WINDOW,
         step=10
     )
 
@@ -169,6 +173,7 @@ def show_backtester_ui():
     fixed_cost = st.sidebar.number_input("Fixe Kosten pro Trade", 0.0, 100.0, CFG_FIXED_COST)
     var_cost   = st.sidebar.number_input("Variable Kosten (%)", 0.0, 1.0, CFG_VAR_COST*100) / 100.0
 
+    
     # ### OPTIMIZER START – Sidebar‑Widgets  ###
     st.sidebar.markdown("---")
     st.sidebar.header("🚀 Optimizer")
@@ -198,55 +203,21 @@ def show_backtester_ui():
         st.error("Bitte einen Monat auswählen.")
         return
 
-    # — 9) Ticker + PriceData laden + Pivot … und Backtest laufen lassen —
+     # --- Ticker laden ---
     tickers = dm.get_tickers_for(month, sources)
-
-    #DEBUG
-    #st.write(f"🔎 got {len(tickers)} tickers:", tickers)
-
     if not tickers:
         st.error("Keine Ticker für diese Auswahl.")
         return
 
-    end = dt.date.today()
-    _history_start = (
-        (end - dt.timedelta(days=window_days)).strftime("%Y-%m-%d")
-        if mode.startswith("statisch")
-        else f"{month}-01"
-    )
-    # Statt history_start / month-Logik:
-    raw = dm.get_price_data(
-        tickers,
-        start_date.strftime("%Y-%m-%d"),
-        end_date.strftime("%Y-%m-%d")
-    )
+    # --- Preisdaten laden ---
+    price_df, price_start = load_price_df(dm, tickers, start_date, end_date, window_days)
+    st.write(f"⏳ Lade Preisdaten von {price_start} bis {end_date}")
+    st.write(f"Price-DF nach Load: {price_df.index.min()} bis {price_df.index.max()}")
 
-    #DEBUG
-    #st.write(f"🔎 got {len(raw)} raw price records")
-
-    #if raw:
-    #    st.write(raw[:3])  # oder raw[0].model_dump() / raw[0].dict()
-    #------------------------
-
-    if not raw:
+    if price_df.empty:
         st.error("Keine Preisdaten gefunden.")
         return
-
-    price_df = (
-        pd.DataFrame([r.model_dump() for r in raw])
-          .assign(date=lambda df: pd.to_datetime(df["trade_date"]))
-          .pivot(index="date", columns="ticker", values="close")
-          .sort_index()
-    )
-
-    # ① komplette Business-Day-Range vom Backtest-Start bis -Ende erzeugen
-    full_idx = pd.date_range(start_date, end_date, freq=BDay())
-
-    # ② reindex auf die volle Zeitachse
-    price_df = price_df.reindex(full_idx)
-
-    # ③ fehlende Kurse per forward-fill aus dem letzten bekannten Kurs ziehen
-    price_df = price_df.fillna(method="ffill")
+    
 
     # ‣ wenn weniger Ticker da sind als num_stocks, auf available runterschrauben
     orig_num_stocks = num_stocks
@@ -264,11 +235,13 @@ def show_backtester_ui():
     #----------------------
 
     with st.spinner("📈 Backtest läuft…"):
-        engine = SharpeBacktestEngine(
+        # 1) Baseline (ohne Overlay)
+        engine_baseline = SharpeBacktestEngine(
             price_df,
             start_balance,
             num_stocks,
-            start_month=month,
+            #start_month=month,
+            start_month=start_date.strftime("%Y-%m-%d"),
             universe_mode="static" if mode.startswith("statisch") else "dynamic",
             optimizer_method=opt_method,
             cov_estimator=cov_estimator,
@@ -283,8 +256,31 @@ def show_backtester_ui():
             variable_cost_pct=var_cost,
             optimization_mode=opt_mode,
         )
+        engine_baseline.risk_overlay = None  # <--- Overlay AUS!
+        engine_baseline.run_with_next_month_allocation()
 
-        engine.universe_mode = "static" if mode.startswith("statisch") else "dynamic"
+        # 2) Overlay (mit Risk On/Off)
+        engine_overlay = SharpeBacktestEngine(
+            price_df,
+            start_balance,
+            num_stocks,
+            #start_month=month,
+            start_month=start_date.strftime("%Y-%m-%d"),
+            universe_mode="static" if mode.startswith("statisch") else "dynamic",
+            optimizer_method=opt_method,
+            cov_estimator=cov_estimator,
+            rebalance_frequency=rebalance_freq,
+            custom_rebalance_months=custom_months,
+            window_days=window_days,
+            min_weight=min_w,
+            max_weight=max_w,
+            force_equal_weight=force_eq,
+            enable_trading_costs=enable_tc,
+            fixed_cost_per_trade=fixed_cost,
+            variable_cost_pct=var_cost,
+            optimization_mode=opt_mode,
+        )
+        engine_overlay.run_with_next_month_allocation()
 
         # collect infos for Parameter tab
         ui_params = {
@@ -313,7 +309,6 @@ def show_backtester_ui():
         #st.write(f"🔎 running backtest on {price_df.shape[0]} days × {price_df.shape[1]} tickers")
         #----------------------
 
-        engine.run_with_next_month_allocation()
 
         #DEBUG
         #st.write("🔎 final portfolio_value:", engine.portfolio_value.tail())
@@ -341,250 +336,303 @@ def show_backtester_ui():
     ])
 
     with tabs[0]:
-        st.subheader("🔍 KPI-Übersicht")
-        if not engine.performance_metrics.empty:
-            st.dataframe(engine.performance_metrics, hide_index=True, use_container_width=True)
+        st.subheader("🔍 KPI-Vergleich: Baseline vs. Risk-Overlay")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Baseline**")
+            st.dataframe(engine_baseline.performance_metrics, hide_index=True, use_container_width=True)
+        with col2:
+            st.markdown("**Risk-On/Risk-Off**")
+            st.dataframe(engine_overlay.performance_metrics, hide_index=True, use_container_width=True)
 
         st.markdown("---")
         st.subheader("📈 Portfolio-Verlauf")
-        if not engine.portfolio_value.empty:
-            st.line_chart(engine.portfolio_value)
+        st.line_chart(
+            pd.DataFrame({
+                "Baseline": engine_baseline.portfolio_value,
+                "Risk-On/Risk-Off": engine_overlay.portfolio_value,
+            })
+        )
 
         st.markdown("---")
         st.subheader("📆 Monatliche Performance (%)")
-        if not engine.monthly_performance.empty:
-            st.bar_chart(
-                engine.monthly_performance.set_index("Date")["Monthly PnL (%)"]
-            )
+        perf_df = pd.DataFrame({
+            "Baseline": engine_baseline.monthly_performance.set_index("Date")["Monthly PnL (%)"],
+            "Risk-On/Risk-Off": engine_overlay.monthly_performance.set_index("Date")["Monthly PnL (%)"],
+        })
+        st.bar_chart(perf_df)
 
     with tabs[1]:
-        st.subheader("📅 Daily Portfolio")
-        if not engine.daily_df.empty:
-            st.dataframe(engine.daily_df, use_container_width=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("📅 Daily Portfolio Baseline")
+            if not engine_baseline.daily_df.empty:
+                st.dataframe(engine_baseline.daily_df, use_container_width=True)
+            else:
+                st.info("Keine Daily-Daten für Baseline.")
+        with col2:
+            st.subheader("📅 Daily Portfolio Overlay")
+            if not engine_overlay.daily_df.empty:
+                st.dataframe(engine_overlay.daily_df, use_container_width=True)
+            else:
+                st.info("Keine Daily-Daten für Overlay.")
+
 
     with tabs[2]:
-        st.subheader("🗓️ Monthly Performance Detail")
-        if not engine.price_data.empty and not engine.portfolio_value.empty:
-            # 1) Monats-Endkurse und Monats-End-Portfolio-Wert
-            monthly_prices  = engine.price_data.resample("ME").last()
-            monthly_balance = engine.portfolio_value.resample("ME").last()
-
-            # 2) Index-Namen setzen, damit reset_index() eine Spalte "Date" erzeugt
-            monthly_prices.index.name  = "Date"
-            monthly_balance.index.name = "Date"
-
-            # 3) Monatsrenditen in Prozent
-            monthly_returns = monthly_prices.pct_change().dropna(how="all") * 100
-
-            # 4) Portfolio-Monatsrendite aus engine.monthly_performance
-            port_rets = (
-                engine.monthly_performance
-                    .set_index("Date")["Monthly PnL (%)"]
-            )
-
-            # 5) alles in ein DataFrame packen
-            df = monthly_returns.copy()
-            df["Balance"]    = monthly_balance
-            df["Return (%)"] = port_rets
-
-            # 6) Index in Spalte umwandeln – jetzt gibt es garantiert eine Spalte "Date"
-            df = df.reset_index()
-
-            # 7) Jahr und Monatsname aus "Date" ableiten
-            df["Year"]  = df["Date"].dt.year
-            df["Month"] = df["Date"].dt.month_name()
-
-            # 8) **WICHTIG**: zuerst nach Date absteigend sortieren
-            df = df.sort_values("Date", ascending=False).reset_index(drop=True)
-
-            # 9) dann die finalen Spalten in der gewünschten Reihenfolge auswählen
-            cols = ["Year", "Month", "Return (%)", "Balance"] + list(monthly_returns.columns)
-            df = df[cols]
-
-            # 10) Formatierung: Prozent-Spalten mit 1 Dezimalstelle und Prozentzeichen
-            percent_cols = ["Return (%)"] + list(monthly_returns.columns)
-            fmt = {
-                **{c: "{:.1f}%" for c in percent_cols},   # Prozent-Spalten mit 1 Dezimalstelle + '%'
-                "Balance": "{:,.0f}"                      # Balance ohne Dezimalstellen, Tausender-Komma
-            }
-            styled = df.style.format(fmt)
-
-            st.dataframe(styled, use_container_width=True)
-
-        else:
-            st.info("Keine Daten für Monthly Performance.")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("🗓️ Monthly Performance Baseline")
+            if not engine_baseline.monthly_performance.empty:
+                st.dataframe(engine_baseline.monthly_performance, use_container_width=True)
+            else:
+                st.info("Keine Monatsdaten für Baseline.")
+        with col2:
+            st.subheader("🗓️ Monthly Performance Overlay")
+            if not engine_overlay.monthly_performance.empty:
+                st.dataframe(engine_overlay.monthly_performance, use_container_width=True)
+            else:
+                st.info("Keine Monatsdaten für Overlay.")
 
     with tabs[3]:
-        st.subheader("🗓️ Yearly Performance Detail")
-        if not engine.price_data.empty and not engine.portfolio_value.empty:
-            # 1) Jahr-Endkurse und Jahr-End-Portfolio-Wert
-            yearly_prices  = engine.price_data.resample("YE").last()
-            yearly_balance = engine.portfolio_value.resample("YE").last()
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("🗓️ Yearly Performance Baseline")
+            if not engine_baseline.portfolio_value.empty:
+                yearly_balance = engine_baseline.portfolio_value.resample("YE").last()
+                yearly_start = engine_baseline.portfolio_value.resample("YE").first()
+                yearly_pnl = yearly_balance - yearly_start
+                yearly_ret = yearly_balance.pct_change() * 100
 
-            # 2) Index benennen, damit reset_index eine Date-Spalte erzeugt
-            yearly_prices.index.name  = "Date"
-            yearly_balance.index.name = "Date"
+                # Summiere die Monthly PnL für jedes Jahr
+                monthly_pnl = engine_baseline.monthly_performance.copy()
+                monthly_pnl["Year"] = pd.to_datetime(monthly_pnl["Date"]).dt.year
+                yearly_monthly_pnl = monthly_pnl.groupby("Year")["Monthly PnL ($)"].sum()
 
-            # 3) Jahres-Renditen in Prozent für alle Ticker
-            yearly_returns  = yearly_prices.pct_change().dropna(how="all") * 100
+                df = pd.DataFrame({
+                    "Year": yearly_balance.index.year,
+                    "Yearly PnL (Portfolio Value)": yearly_pnl.values,
+                    "Yearly PnL (Sum Monthly)": yearly_monthly_pnl.reindex(yearly_balance.index.year).values,
+                    "Return (%)": yearly_ret.values,
+                    "Balance": yearly_balance.values
+                }).reset_index(drop=True)
+                st.dataframe(df, use_container_width=True)
+            else:
+                st.info("Keine Jahresdaten für Baseline.")
+        with col2:
+            st.subheader("🗓️ Yearly Performance Overlay")
+            if not engine_overlay.portfolio_value.empty:
+                yearly_balance = engine_overlay.portfolio_value.resample("YE").last()
+                yearly_ret = yearly_balance.pct_change() * 100
+                df = pd.DataFrame({
+                    "Year": yearly_balance.index.year,
+                    "Return (%)": yearly_ret,
+                    "Balance": yearly_balance
+                }).reset_index(drop=True)
+                st.dataframe(df, use_container_width=True)
+            else:
+                st.info("Keine Jahresdaten für Overlay.")
 
-            # 4) Portfolio-Jahresrendite
-            port_year_rets = yearly_balance.pct_change().dropna() * 100
-
-            # 5) DataFrame zusammenbauen
-            df_year = yearly_returns.copy()
-            df_year["Balance"]    = yearly_balance
-            df_year["Return (%)"] = port_year_rets
-
-            # 6) Index in Spalte umwandeln
-            df_year = df_year.reset_index()
-
-            # 7) Year aus der Date-Spalte
-            df_year["Year"] = df_year["Date"].dt.year
-
-            # 8) Spalten in gewünschter Reihenfolge
-            cols = ["Year", "Return (%)", "Balance"] + list(yearly_returns.columns)
-            df_year = df_year[cols]
-
-            # 9) Neueste Jahre zuerst
-            df_year = df_year.sort_values("Year", ascending=False).reset_index(drop=True)
-
-            # 10) Prozentformatierung auf 1 Dezimalstelle
-            percent_cols = ["Return (%)"] + list(yearly_returns.columns)
-            fmt = {
-                **{c: "{:.1f}%" for c in percent_cols},     # Percent columns
-                "Balance": "{:,.0f}"                        # Balance: no decimals, comma as thousands separator
-            }
-            styled = df_year.style.format(fmt)
-
-            st.dataframe(styled, use_container_width=True)
-        else:
-            st.info("Keine Daten für Yearly Performance.")
 
 
     with tabs[4]:
-        st.subheader("📊 Monthly Allocation")
-        if not engine.monthly_allocations.empty:
-            df_sorted = engine.monthly_allocations.sort_values(
-                by="Rebalance Date",
-                ascending=False
-            )
-            st.dataframe(df_sorted, use_container_width=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("📊 Monthly Allocation Baseline")
+            if not engine_baseline.monthly_allocations.empty:
+                df_sorted = engine_baseline.monthly_allocations.sort_values(
+                    by="Rebalance Date", ascending=False
+                )
+                st.dataframe(df_sorted, use_container_width=True)
+            else:
+                st.info("Keine Daten für Baseline.")
+        with col2:
+            st.subheader("📊 Monthly Allocation Overlay")
+            if not engine_overlay.monthly_allocations.empty:
+                df_sorted = engine_overlay.monthly_allocations.sort_values(
+                    by="Rebalance Date", ascending=False
+                )
+                st.dataframe(df_sorted, use_container_width=True)
+            else:
+                st.info("Keine Daten für Overlay.")
+
 
     with tabs[5]:
-        # hole das letzte Datum aus engine.portfolio_value (oder price_data)
-        last_date = engine.price_data.index.max()
-
-        # bestimme den aktuellen Monat und addiere 1
-        next_period = last_date.to_period("M") + 1
-
-        # formatiere Anf- und Enddatum
-        start = next_period.to_timestamp(how="start").strftime("%d. %B %Y")
-        end   = next_period.to_timestamp(how="end").strftime("%d. %B %Y")
-
-        # Anzeige in Deinem Tab:
-        st.subheader("🔮 Next Month Allocation")
-        st.markdown(f"**Zeitraum:** {start} – {end}")
-
-        if hasattr(engine, "next_month_weights"):
+        st.subheader("🔮 Next Month Allocation Baseline")
+        if hasattr(engine_baseline, "next_month_weights"):
             df_next = (
-                engine.next_month_weights
-                    .mul(100)               # in Prozent
+                engine_baseline.next_month_weights
+                    .mul(100)
                     .reset_index()
             )
-            df_next.columns = ["Ticker","Gewicht (%)"]
+            df_next.columns = ["Ticker", "Gewicht (%)"]
             st.dataframe(df_next, use_container_width=True)
         else:
-            st.info("Keine Auswahl für den Folgemonat (zu wenige Daten).")
+            st.info("Keine Auswahl für den Folgemonat (Baseline).")
+
+        st.subheader("🔮 Next Month Allocation Overlay")
+        if hasattr(engine_overlay, "next_month_weights"):
+            df_next = (
+                engine_overlay.next_month_weights
+                    .mul(100)
+                    .reset_index()
+            )
+            df_next.columns = ["Ticker", "Gewicht (%)"]
+            st.dataframe(df_next, use_container_width=True)
+        else:
+            st.info("Keine Auswahl für den Folgemonat (Overlay).")
+
 
     with tabs[6]:
-        st.subheader("📉 Top 10 Drawdowns")
-        # Drawdown-Berechnung
-        df_port = engine.portfolio_value.to_frame(name="Portfolio")
-        df_port["Peak"] = df_port["Portfolio"].cummax()
-        df_port["Drawdown"] = df_port["Portfolio"] / df_port["Peak"] - 1
-
-        # Drawdown-Episoden extrahieren
-        periods = []
-        in_dd = False
-        for date, row in df_port.iterrows():
-            if not in_dd and row["Drawdown"] < 0:
-                in_dd = True
-                start = date
-                peak_val = row["Peak"]
-                trough_val = row["Portfolio"]
-                trough = date
-            elif in_dd:
-                if row["Portfolio"] < trough_val:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("📉 Top 10 Drawdowns Baseline")
+            df_port = engine_baseline.portfolio_value.to_frame(name="Portfolio")
+            df_port["Peak"] = df_port["Portfolio"].cummax()
+            df_port["Drawdown"] = df_port["Portfolio"] / df_port["Peak"] - 1
+            periods = []
+            in_dd = False
+            for date, row in df_port.iterrows():
+                if not in_dd and row["Drawdown"] < 0:
+                    in_dd = True
+                    start = date
+                    peak_val = row["Peak"]
                     trough_val = row["Portfolio"]
                     trough = date
-                if row["Portfolio"] >= peak_val:
-                    # Drawdown abgeschlossen
-                    periods.append({
-                        "Start":            start.date(),
-                        "Trough":           trough.date(),
-                        "End":              date.date(),
-                        "Length (Days)":    (date - start).days,
-                        "Recovery Time":    (date - trough).days,
-                        "Drawdown (%)":     round((trough_val/peak_val - 1)*100, 2),
-                    })
-                    in_dd = False
+                elif in_dd:
+                    if row["Portfolio"] < trough_val:
+                        trough_val = row["Portfolio"]
+                        trough = date
+                    if row["Portfolio"] >= peak_val:
+                        periods.append({
+                            "Start":            start.date(),
+                            "Trough":           trough.date(),
+                            "End":              date.date(),
+                            "Length (Days)":    (date - start).days,
+                            "Recovery Time":    (date - trough).days,
+                            "Drawdown (%)":     round((trough_val/peak_val - 1)*100, 2),
+                        })
+                        in_dd = False
+            if in_dd:
+                last_date = df_port.index[-1]
+                periods.append({
+                    "Start":         start.date(),
+                    "Trough":        trough.date(),
+                    "End":           last_date.date(),
+                    "Length (Days)": (last_date - start).days,
+                    "Recovery Time": None,
+                    "Drawdown (%)":  round((trough_val/peak_val - 1)*100, 2),
+                })
+            df_dd = (
+                pd.DataFrame(periods)
+                .sort_values(by="Drawdown (%)")
+                .head(10)
+                .reset_index(drop=True)
+            )
+            if not df_dd.empty:
+                st.dataframe(df_dd, use_container_width=True)
+            else:
+                st.info("Keine Drawdown-Daten für Baseline.")
+        with col2:
+            st.subheader("📉 Top 10 Drawdowns Overlay")
+            df_port = engine_overlay.portfolio_value.to_frame(name="Portfolio")
+            df_port["Peak"] = df_port["Portfolio"].cummax()
+            df_port["Drawdown"] = df_port["Portfolio"] / df_port["Peak"] - 1
+            periods = []
+            in_dd = False
+            for date, row in df_port.iterrows():
+                if not in_dd and row["Drawdown"] < 0:
+                    in_dd = True
+                    start = date
+                    peak_val = row["Peak"]
+                    trough_val = row["Portfolio"]
+                    trough = date
+                elif in_dd:
+                    if row["Portfolio"] < trough_val:
+                        trough_val = row["Portfolio"]
+                        trough = date
+                    if row["Portfolio"] >= peak_val:
+                        periods.append({
+                            "Start":            start.date(),
+                            "Trough":           trough.date(),
+                            "End":              date.date(),
+                            "Length (Days)":    (date - start).days,
+                            "Recovery Time":    (date - trough).days,
+                            "Drawdown (%)":     round((trough_val/peak_val - 1)*100, 2),
+                        })
+                        in_dd = False
+            if in_dd:
+                last_date = df_port.index[-1]
+                periods.append({
+                    "Start":         start.date(),
+                    "Trough":        trough.date(),
+                    "End":           last_date.date(),
+                    "Length (Days)": (last_date - start).days,
+                    "Recovery Time": None,
+                    "Drawdown (%)":  round((trough_val/peak_val - 1)*100, 2),
+                })
+            df_dd = (
+                pd.DataFrame(periods)
+                .sort_values(by="Drawdown (%)")
+                .head(10)
+                .reset_index(drop=True)
+            )
+            if not df_dd.empty:
+                st.dataframe(df_dd, use_container_width=True)
+            else:
+                st.info("Keine Drawdown-Daten für Overlay.")
 
-        # laufende DD-Periode (falls nicht abgeschlossen)
-        if in_dd:
-            last_date = df_port.index[-1]
-            periods.append({
-                "Start":         start.date(),
-                "Trough":        trough.date(),
-                "End":           last_date.date(),
-                "Length (Days)": (last_date - start).days,
-                "Recovery Time": None,
-                "Drawdown (%)":  round((trough_val/peak_val - 1)*100, 2),
-            })
-
-        # Top 10 sortiert nach Drawdown‐Size
-        df_dd = (
-            pd.DataFrame(periods)
-            .sort_values(by="Drawdown (%)")  # drawdowns sind negativ, also aufsteigend = größter Drawdown zuerst
-            .head(10)
-            .reset_index(drop=True)
-        )
-
-        # Spaltenreihenfolge und Header anpassen
-        df_dd = df_dd[
-            ["Start", "End", "Length (Days)", "Recovery Time", "Trough", "Drawdown (%)"]
-        ]
-        df_dd.columns = [
-            "Start", "End", "Length", "Recovery Time", "Underwater Period", "Drawdown"
-        ]
-
-        st.dataframe(df_dd, use_container_width=True)
 
     # Tab 5: Trading Costs
     with tabs[7]:
-        st.subheader("💸 Trading Costs")
-        if not engine.monthly_allocations.empty and "Trading Costs" in engine.monthly_allocations:
-            cost_df = (
-                engine.monthly_allocations
-                    .dropna(subset=["Trading Costs"])
-                    .groupby("Rebalance Date")["Trading Costs"]
-                    .sum()
-                    .reset_index(name="Total Trading Costs")
-            )
-            st.dataframe(cost_df, use_container_width=True)
-        else:
-            st.info("Keine Trading-Kosten-Daten vorhanden.")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("💸 Trading Costs Baseline")
+            if not engine_baseline.monthly_allocations.empty and "Trading Costs" in engine_baseline.monthly_allocations:
+                cost_df = (
+                    engine_baseline.monthly_allocations
+                        .dropna(subset=["Trading Costs"])
+                        .groupby("Rebalance Date")["Trading Costs"]
+                        .sum()
+                        .reset_index(name="Total Trading Costs")
+                )
+                st.dataframe(cost_df, use_container_width=True)
+            else:
+                st.info("Keine Trading-Kosten-Daten für Baseline.")
+        with col2:
+            st.subheader("💸 Trading Costs Overlay")
+            if not engine_overlay.monthly_allocations.empty and "Trading Costs" in engine_overlay.monthly_allocations:
+                cost_df = (
+                    engine_overlay.monthly_allocations
+                        .dropna(subset=["Trading Costs"])
+                        .groupby("Rebalance Date")["Trading Costs"]
+                        .sum()
+                        .reset_index(name="Total Trading Costs")
+                )
+                st.dataframe(cost_df, use_container_width=True)
+            else:
+                st.info("Keine Trading-Kosten-Daten für Overlay.")
+
 
     # Tab 6: Rebalance Analysis
     with tabs[8]:
-        st.subheader("🔁 Rebalance Analysis")
-        df_reb = pd.DataFrame(engine.selection_details)
-        # nur echte Rebalances, keine SUMMARY-Zeile
-        df_reb = df_reb[df_reb["Rebalance Date"] != "SUMMARY"].copy()
-        if len(df_reb) > 1:
-            df_reb["Rebalance Date"] = pd.to_datetime(df_reb["Rebalance Date"])
-            df_reb["Days Since Last"] = df_reb["Rebalance Date"].diff().dt.days
-        st.dataframe(df_reb, use_container_width=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("🔁 Rebalance Analysis Baseline")
+            df_reb = pd.DataFrame(engine_baseline.selection_details)
+            df_reb = df_reb[df_reb["Rebalance Date"] != "SUMMARY"].copy()
+            if len(df_reb) > 1:
+                df_reb["Rebalance Date"] = pd.to_datetime(df_reb["Rebalance Date"])
+                df_reb["Days Since Last"] = df_reb["Rebalance Date"].diff().dt.days
+            st.dataframe(df_reb, use_container_width=True)
+        with col2:
+            st.subheader("🔁 Rebalance Analysis Overlay")
+            df_reb = pd.DataFrame(engine_overlay.selection_details)
+            df_reb = df_reb[df_reb["Rebalance Date"] != "SUMMARY"].copy()
+            if len(df_reb) > 1:
+                df_reb["Rebalance Date"] = pd.to_datetime(df_reb["Rebalance Date"])
+                df_reb["Days Since Last"] = df_reb["Rebalance Date"].diff().dt.days
+            st.dataframe(df_reb, use_container_width=True)
+
 
     # Tab 7: Parameters
     with tabs[9]:
@@ -596,20 +644,33 @@ def show_backtester_ui():
     # Tab 8: Logs
     with tabs[10]:
         st.subheader("🪵 Logs")
-        for line in engine.ticker_coverage_logs + engine.log_lines:
+        for line in engine_baseline.ticker_coverage_logs + engine_baseline.log_lines:
             st.text(line)
 
-    # Excel Download
+    # Excel Download: Baseline und Overlay getrennt
     with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_path = os.path.join(tmp_dir,"AlphaMachine_Report.xlsx")
-        export_results_to_excel(engine,tmp_path)
-        with open(tmp_path,"rb") as f:
+        # Baseline-Report
+        path_baseline = os.path.join(tmp_dir, f"AlphaMachine_Baseline_{dt.date.today()}.xlsx")
+        export_results_to_excel(engine_baseline, path_baseline)
+        with open(path_baseline, "rb") as f:
             st.download_button(
-                "📥 Excel-Report",
+                "📥 Excel-Report Baseline",
                 f.read(),
-                file_name=f"AlphaMachine_{dt.date.today()}.xlsx",
+                file_name=os.path.basename(path_baseline),
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
+
+        # Overlay-Report
+        path_overlay = os.path.join(tmp_dir, f"AlphaMachine_Overlay_{dt.date.today()}.xlsx")
+        export_results_to_excel(engine_overlay, path_overlay)
+        with open(path_overlay, "rb") as f:
+            st.download_button(
+                "📥 Excel-Report Overlay",
+                f.read(),
+                file_name=os.path.basename(path_overlay),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
   
 
 # =============================================================================
@@ -764,18 +825,15 @@ def show_optimizer_ui():
     end_date   = col2.date_input("Backtest-Ende",  value=dt.date.today(), min_value=start_date)
 
     # Preise laden
-    price_df = load_price_df(month, sources, start_date, end_date)
-    if price_df.empty:
-        st.warning("⚠️ Keine Preisdaten gefunden.")
+    # ----- Preise laden -----------------------------------------
+    tickers = dm.get_tickers_for(month, sources)
+    if not tickers:
+        st.warning("⚠️ Keine Ticker für diese Auswahl.")
         st.stop()
 
-    # Vollständige Handelstage-Range + NaN-Handling
-    from pandas.tseries.offsets import BDay
-    full_idx = pd.date_range(start_date, end_date, freq=BDay())
-    price_df = (
-        price_df
-        .reindex(full_idx)
-        .ffill()  # forward-fill – kein bfill mehr
+    MAX_LOOKBACK = 1000  # größtes window_days im Suchraum
+    price_df, price_start = load_price_df(
+        dm, tickers, start_date, end_date, MAX_LOOKBACK
     )
 
     # ---------- Suchraum-Editor ------------------------------------
@@ -810,9 +868,10 @@ def show_optimizer_ui():
     st.info(f"🎯 Aktueller Suchraum:  {search_space}")
 
     # Defaults für fixe Parameter, falls nicht optimiert
+    start_date_str = start_date.strftime("%Y-%m-%d")
     base_kwargs = {
         "start_balance":          100_000,
-        "start_month":            month,
+        "start_month":            start_date_str,
         "universe_mode":          "static",
         "rebalance_frequency":    "monthly",
         "custom_rebalance_months": 1,
@@ -919,6 +978,11 @@ def show_study_results(study, kpi_weights, price_df, fixed_kwargs):
     eng_best = SharpeBacktestEngine(price_df, **run_kwargs)
     eng_best.run_with_next_month_allocation()
 
+    st.markdown("---")
+    st.write("Engine-Start:", eng_best.user_start_date)
+    st.header("🚀 Details des Best-Runs")
+    render_engine_tabs(eng_best)
+
     # ------- D) Best-Run KPIs & Parameter -------------------------
     best = top_df.iloc[0]
     param_cols = [c for c in best.index if c not in ("number", "value", *kpis)]
@@ -953,6 +1017,42 @@ def show_study_results(study, kpi_weights, price_df, fixed_kwargs):
 
     st.subheader("📈 Performance & Balance pro Jahr des Best-Runs")
     st.table(df_year.astype({"Year": int}).reset_index(drop=True))
+
+def render_engine_tabs(engine):
+    tabs = st.tabs(["Dashboard", "Daily", "Monthly", "Yearly", "Drawdown"])
+
+    # --- Dashboard ------------------------------------------------
+    with tabs[0]:
+        st.subheader("🔍 KPI-Übersicht")
+        st.dataframe(engine.performance_metrics, hide_index=True, use_container_width=True)
+        st.line_chart(engine.portfolio_value, height=250)
+
+    # --- Daily ----------------------------------------------------
+    with tabs[1]:
+        st.subheader("📅 Daily Portfolio")
+        st.dataframe(engine.daily_df, use_container_width=True)
+
+    # --- Monthly --------------------------------------------------
+    with tabs[2]:
+        st.subheader("🗓️ Monthly Performance")
+        st.dataframe(engine.monthly_performance, use_container_width=True)
+
+    # --- Yearly ---------------------------------------------------
+    with tabs[3]:
+        yearly_bal = engine.portfolio_value.resample("YE").last()
+        yearly_ret = yearly_bal.pct_change()*100
+        df_year = pd.DataFrame({"Year": yearly_bal.index.year,
+                                "Return (%)": yearly_ret,
+                                "Balance": yearly_bal})
+        st.dataframe(df_year.reset_index(drop=True), use_container_width=True)
+
+    # --- Drawdown -------------------------------------------------
+    with tabs[4]:
+        df_port = engine.portfolio_value.to_frame("Portfolio")
+        df_port["Peak"] = df_port["Portfolio"].cummax()
+        df_port["Drawdown"] = df_port["Portfolio"] / df_port["Peak"] - 1
+        dd = (df_port["Drawdown"]*100).round(2)
+        st.line_chart(dd, height=250)
 
 
 

@@ -57,3 +57,9 @@ BENCHMARK_TICKERS = ["SPY"]
 COV_ESTIMATOR = (
     "ledoit-wolf"  # Optionen: "ledoit-wolf", "constant-corr", "factor-model"
 )
+
+# === Risikomanagement ===
+RISK_OVERLAY = {
+    "enabled": False,
+    "config_path": os.path.join(os.path.dirname(__file__), "risk_overlay", "overlay_config.json")
+}
