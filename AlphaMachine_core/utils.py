@@ -198,7 +198,7 @@ def allocate_positions(
         for ticker, pos in previous_positions.items():
             if ticker not in tickers:  # Diese Position wird geschlossen
                 trading_costs = fixed_cost_per_trade
-                trading_costs += pos["shares"] * pos["cost_basis"] * variable_cost_pct
+                trading_costs += pos["shares"] * price_data.at[date, ticker] * variable_cost_pct
                 total_costs += trading_costs
 
                 allocations.append(

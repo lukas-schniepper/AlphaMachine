@@ -1,0 +1,27 @@
+{
+  "indicators": [
+    {
+      "path": "AlphaMachine_core.risk_overlay.indicators.sma",
+      "class": "SMAIndicator",
+      "params": {"period": 50},
+      "mode": "risk_on"
+    },
+    {
+      "path": "AlphaMachine_core.risk_overlay.indicators.ma200",
+      "class": "MA200CloseIndicator",
+      "params": {"ma_period": 200, "days_below": 3},
+      "mode": "risk_off"
+    },
+    {
+      "path": "AlphaMachine_core.risk_overlay.indicators.ema_cross",
+      "class": "EMACrossIndicator",
+      "params": {"fast": 50, "slow": 200}
+    },
+    {
+      "path": "AlphaMachine_core.risk_overlay.indicators.sentiment",
+      "class": "SentimentZScoreIndicator",
+      "params": {"column": "sentiment"},
+      "mode": "risk_on"
+    }
+  ]
+}

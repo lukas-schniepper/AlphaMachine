@@ -87,5 +87,7 @@ tzdata==2025.2 ; python_version >= "3.10" and python_version < "4.0"
 urllib3==2.4.0 ; python_version >= "3.10" and python_version < "4.0"
 validators==0.34.0 ; python_version >= "3.10" and python_version < "4.0"
 watchdog==6.0.0 ; python_version >= "3.10" and python_version < "4.0" and platform_system != "Darwin"
+sqlmodel
+psycopg[binary]
 yfinance==0.2.56 ; python_version >= "3.10" and python_version < "4.0"
 -e .

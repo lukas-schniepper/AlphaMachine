@@ -20,7 +20,7 @@ def get_cov_matrix(
         )
     elif method == "constant-corr":
         std = returns.std()
-        corr_matrix = returns.corr()
+        corr_matrix = returns.corr().fillna(0.0) 
         avg_corr = (
             corr_matrix.values[np.triu_indices_from(corr_matrix.values, 1)]
         ).mean()
@@ -79,6 +79,23 @@ def get_recursive_bisection(cov):
             w[sub_cluster] *= parity_w
     return w / w.sum()
 
+def _safe_linkage_from_returns(returns: pd.DataFrame):
+    """
+    Erstellt (corr, link) für HRP:
+      • füllt fehlende Korrelationen mit 0
+      • ersetzt nicht-finite Distanzen durch den größten finiten Wert + ε
+    """
+    corr = returns.corr().fillna(0.0)                 # NaN-Korrelation = 0
+    dist = np.sqrt(0.5 * (1 - corr))
+    dist_cond = pdist(dist.values)                    # -> condensed vector
+
+    if not np.isfinite(dist_cond).all():              # Notfall-Ersatz
+        max_finite = np.nanmax(dist_cond[np.isfinite(dist_cond)]) or 1.0
+        dist_cond = np.where(
+            np.isfinite(dist_cond), dist_cond, max_finite + 1e-6
+        )
+    link = linkage(dist_cond, method="single")
+    return corr, link
 
 def optimize_portfolio(
     returns: pd.DataFrame,
@@ -93,12 +110,22 @@ def optimize_portfolio(
     num_stocks: int = None,
 ) -> pd.Series:
 
-    print("⚙️ Optimizer Call")
-    print(f"   → Variante: {debug_label}")
-    print(f"   → Methode: {method}")
-    print(f"   → Kovarianzschätzer: {cov_estimator}")
-    print(f"   → Force Equal Weight: {force_equal_weight}")
-    print(f"   → Tickers: {len(returns.columns)} → {list(returns.columns[:5])}...")
+    #print("⚙️ Optimizer Call")
+    #print(f"   → Variante: {debug_label}")
+    #print(f"   → Methode: {method}")
+    #print(f"   → Kovarianzschätzer: {cov_estimator}")
+    #print(f"   → Force Equal Weight: {force_equal_weight}")
+    #print(f"   → Tickers: {len(returns.columns)} → {list(returns.columns[:5])}...")
+
+    # --------------------------------------------------------
+    # Cleanup: entferne Spalten ohne Varianz oder nur NaN
+    # --------------------------------------------------------
+    returns = (
+        returns.loc[:, returns.std(ddof=0).replace(0, np.nan).notna()]  # 0-Varianz raus
+                .dropna(axis=1, how="all")                              # nur-NaN raus
+    )
+    if returns.shape[1] == 0:
+        raise ValueError("Keine gültigen Return-Daten nach Cleaning.")
 
     tickers = returns.columns
 
@@ -113,9 +140,7 @@ def optimize_portfolio(
 
         # Methode-spezifische Vorauswahl
         if method == "hrp":
-            corr = returns.corr()
-            dist = np.sqrt(0.5 * (1 - corr))
-            link = linkage(pdist(dist), method="single")
+            corr, link = _safe_linkage_from_returns(returns)
             sort_ix = get_quasi_diag(link)
             sorted_tickers = corr.index[sort_ix]
             cov_ = cov.loc[sorted_tickers, sorted_tickers]
@@ -182,9 +207,7 @@ def optimize_portfolio(
         weights = result.x if result.success else x0
 
     elif method == "hrp":
-        corr = returns.corr()
-        dist = np.sqrt(0.5 * (1 - corr))
-        link = linkage(pdist(dist), method="single")
+        corr, link = _safe_linkage_from_returns(returns)
         sort_ix = get_quasi_diag(link)
         sorted_tickers = corr.index[sort_ix]
         cov_ = cov.loc[sorted_tickers, sorted_tickers]
