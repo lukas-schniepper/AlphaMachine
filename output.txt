@@ -1,0 +1,1 @@
+Ein anderer Fehler ist beim Import aufgetreten: cannot import name 'NaN' from 'numpy' (/home/codespace/.local/lib/python3.12/site-packages/numpy/__init__.py)

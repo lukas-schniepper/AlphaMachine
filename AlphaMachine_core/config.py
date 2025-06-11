@@ -1,38 +1,69 @@
-# config.py – zentrale Parameterdatei für den Backtest
+# AlphaMachine_core/config.py
 import os
+from pathlib import Path
+import streamlit as st # Muss importiert werden, um st.secrets zu verwenden
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+_THIS_DIR = Path(__file__).resolve().parent   
+
+print("DEBUG [config.py]: Lese DATABASE_URL...")
+
+# Versuche, DATABASE_URL aus st.secrets zu lesen
+# ANNAHME: Dein Schlüssel in .streamlit/secrets.toml ist direkt "DATABASE_URL"
+# FALLS ER z.B. unter [database] -> url ist, ändere es zu: st.secrets.get("database", {}).get("url")
+DATABASE_URL_FROM_SECRETS = st.secrets.get("DATABASE_URL")
+
+# Fallback auf OS-Umgebungsvariable (nützlich für Tests außerhalb von Streamlit)
+DATABASE_URL_FROM_OS_ENV = os.getenv("DATABASE_URL")
+
+DATABASE_URL = None # Initialisiere
+if DATABASE_URL_FROM_SECRETS:
+    DATABASE_URL = DATABASE_URL_FROM_SECRETS
+    print("DEBUG [config.py]: DATABASE_URL wurde aus st.secrets verwendet.")
+elif DATABASE_URL_FROM_OS_ENV:
+    DATABASE_URL = DATABASE_URL_FROM_OS_ENV
+    print("DEBUG [config.py]: DATABASE_URL wurde aus OS Umgebungsvariable (os.getenv) verwendet.")
+
 if not DATABASE_URL:
-    raise RuntimeError("🛑 Keine DATABASE_URL in der Umgebung gesetzt")
+    error_msg = (
+        "🛑 KRITISCH: Keine DATABASE_URL in config.py gesetzt.\n"
+        "   Für Streamlit: Überprüfe .streamlit/secrets.toml (Schlüssel: 'DATABASE_URL' oder wie von dir definiert).\n"
+        "   Für lokale Tests: Setze die OS Umgebungsvariable DATABASE_URL (z.B. via .env und python-dotenv im Testskript)."
+    )
+    # Um zu sehen, was st.secrets enthält, falls es nicht klappt:
+    # print(f"DEBUG [config.py]: Verfügbare Schlüssel in st.secrets: {list(st.secrets.keys())}")
+    # if 'supabase' in st.secrets: print(f"DEBUG [config.py]: Inhalt von st.secrets.supabase: {st.secrets.supabase}")
+    raise RuntimeError(error_msg)
 
-# === Allgemeine Backtest-Einstellungen ===
+print(f"INFO [config.py]: DATABASE_URL erfolgreich initialisiert (Auszug): ...{DATABASE_URL[-20:]}") # Zeige etwas mehr von der URL zum Prüfen
+
+# API_KEY analog behandeln, falls nötig
+API_KEY = st.secrets.get("API_KEY", os.getenv("API_KEY"))
+if not API_KEY:
+    print("WARNUNG [config.py]: API_KEY nicht gefunden.")
+
+
+# === Deine bestehenden allgemeinen Backtest-Einstellungen ===
 START_BALANCE = 100_000
 NUM_STOCKS = 20
 OPTIMIZE_WEIGHTS = True
 BACKTEST_WINDOW_DAYS = 200
-CSV_PATH = "sample_data/stock_data.csv"
+CSV_PATH = "sample_data/stock_data.csv" # Dieser Pfad ist relativ zum Projekt-Root, wenn von dort ausgeführt
 
 # Rebalancing-Einstellungen
-REBALANCE_FREQUENCY = "monthly"  # "weekly", "monthly", oder ein spezifischer Wert in Monaten, z.B. 3 für quartalsweise
-CUSTOM_REBALANCE_MONTHS = (
-    1  # Wird genutzt, wenn REBALANCE_FREQUENCY nicht "weekly" oder "monthly" ist
-)
+REBALANCE_FREQUENCY = "monthly"
+CUSTOM_REBALANCE_MONTHS = 1
 
 # Trading-Kosten Einstellungen
-ENABLE_TRADING_COSTS = True  # Trading-Kosten ein-/ausschalten
-FIXED_COST_PER_TRADE = 1.0  # Fixer Betrag pro Trade in der Währung deines Portfolios
-VARIABLE_COST_PCT = (
-    0.000  # Variable Kosten als Prozentsatz des Handelsvolumens (0.001 = 0.1%)
-)
+ENABLE_TRADING_COSTS = True
+FIXED_COST_PER_TRADE = 1.0
+VARIABLE_COST_PCT = 0.000
 
 # === Optimierungsmodus ===
-# "select-then-optimize" = erst 20 Ticker auswählen, dann gewichten
-# "optimize-subset" = Optimierer wählt aus z. B. 150 Titeln selbst die besten 20
-OPTIMIZATION_MODE = "select-then-optimize"  # oder "optimize-subset"
+OPTIMIZATION_MODE = "select-then-optimize"
 
 # === Optimierung & Kovarianzschätzung ===
-OPTIMIZER_METHOD = "ledoit-wolf"  # z. B. 'ledoit-wolf', 'minvar', 'hrp'
-COV_ESTIMATOR = "ledoit-wolf"  # später: 'constant-corr', 'factor-model'
+OPTIMIZER_METHOD = "ledoit-wolf"
+COV_ESTIMATOR = "ledoit-wolf"
 
 # === Portfolio-Gewichtslimits ===
 MIN_WEIGHT = 0.01
@@ -53,13 +84,13 @@ USE_BALANCED_OBJECTIVE = False
 USE_BENCHMARK = False
 BENCHMARK_TICKERS = ["SPY"]
 
-# === Kovarianzschätzer ===
-COV_ESTIMATOR = (
-    "ledoit-wolf"  # Optionen: "ledoit-wolf", "constant-corr", "factor-model"
-)
-
 # === Risikomanagement ===
+# Hole "enabled" auch aus Secrets, falls es zur Laufzeit änderbar sein soll, sonst Default hier
+risk_overlay_enabled_secret = st.secrets.get("RISK_OVERLAY_ENABLED", True) 
+
 RISK_OVERLAY = {
-    "enabled": False,
-    "config_path": os.path.join(os.path.dirname(__file__), "risk_overlay", "overlay_config.json")
+    "enabled": risk_overlay_enabled_secret, 
+    "config_path": str(_THIS_DIR / "risk_overlay" / "overlay_config.json"),
+    "safe_assets_path": str(_THIS_DIR / "risk_overlay" / "safe_assets.json"),
 }
+print(f"INFO [config.py]: RISK_OVERLAY enabled: {RISK_OVERLAY['enabled']}")

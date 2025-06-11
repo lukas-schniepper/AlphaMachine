@@ -40,6 +40,7 @@ class SharpeBacktestEngine:
         start_balance: float,
         num_stocks: int,
         start_month: str,
+        use_risk_overlay: bool = True,
         universe_mode: str = "static",
         optimize_weights=None,
         optimizer_method=None,
@@ -125,7 +126,7 @@ class SharpeBacktestEngine:
         self.current_cash = self.start_balance
 
         # RiskOverlay-Objekt initialisieren
-        if CFG.RISK_OVERLAY["enabled"]:
+        if use_risk_overlay and CFG.RISK_OVERLAY.get("enabled", True):
             self.risk_overlay = RiskOverlay(CFG.RISK_OVERLAY["config_path"])
         else:
             self.risk_overlay = None
@@ -202,348 +203,358 @@ class SharpeBacktestEngine:
         self.price_data = self.price_data[valid]
 
     def run_with_next_month_allocation(self, top_universe_size: int = 100):
+        self.log_lines.append(f"INFO: Backtest run_with_next_month_allocation gestartet.")
+        self.log_lines.append(f"INFO: User Start Date: {self.user_start_date.strftime('%Y-%m-%d')}, Effective Start Date: {self.effective_start_date.strftime('%Y-%m-%d')}")
 
-        """
-        Führt den Backtest aus, erlaubt bei jedem Rebalance auch weniger als
-        self.num_stocks verfügbare Ticker (setzt n_stocks = available).
-        """
+        # 1. Renditen vorbereiten
+        returns = self.price_data.pct_change().fillna(0) # ffill(0) ersetzt auch initiale NaNs
+        if returns.empty:
+            self.log_lines.append("FEHLER: Preisdaten sind leer oder führen zu leeren Renditen.")
+            # Setze leere Ergebnisse und beende
+            self.portfolio_value = pd.Series(dtype=float, index=pd.to_datetime([]))
+            self.daily_df = pd.DataFrame(columns=["Date", "Ticker", "Close Price", "Shares", "Allocated Amount", "PnL", "Is_Rebalance_Day", "Trading Costs"])
+            self.monthly_allocations = pd.DataFrame()
+            self._calculate_performance_metrics()
+            return self.portfolio_value
 
-        # 1) Renditen berechnen und vollständig leere Zeilen entfernen
-        returns = self.price_data.pct_change().dropna(how="all")
-
-        # **NEU**: Alle verbliebenen NaNs durch 0 ersetzen,
-        # damit LedoitWolf & Co. sauber rechnen können
-        returns = returns.fillna(0)
-  
-
-        # 2) Rebalance-Zeitplan
-        rebalance_schedule = build_rebalance_schedule(
-            self.price_data,
-            frequency=self.rebalance_freq,
-            custom_months=self.custom_rebalance_months,
+        # 2. Rebalance-Zeitplan erstellen und filtern
+        rebalance_schedule_full = build_rebalance_schedule(
+            self.price_data, frequency=self.rebalance_freq, custom_months=self.custom_rebalance_months
         )
+        
+        rebalance_schedule = []
+        if not returns.empty: # Sicherstellen, dass returns nicht leer ist
+            returns_idx = returns.index
+            for entry in rebalance_schedule_full:
+                rebalance_event_date = entry["end_date"]
+                if rebalance_event_date >= self.user_start_date:
+                    actual_rebal_date_in_returns = rebalance_event_date
+                    if actual_rebal_date_in_returns not in returns_idx:
+                        past_dates = returns_idx[returns_idx <= actual_rebal_date_in_returns]
+                        if not past_dates.empty: actual_rebal_date_in_returns = past_dates[-1]
+                        else: continue
+                    
+                    if actual_rebal_date_in_returns in returns_idx:
+                        window_end_loc = returns_idx.get_loc(actual_rebal_date_in_returns)
+                        if window_end_loc >= self.window_days - 1:
+                            entry["end_date"] = actual_rebal_date_in_returns # Wichtig: Datum anpassen
+                            rebalance_schedule.append(entry)
+        
+        if not rebalance_schedule:
+            msg = f"❌ Kein gültiger Rebalance-Termin gefunden am oder nach {self.user_start_date.strftime('%Y-%m-%d')} mit genügend Historie ({self.window_days} Tage)."
+            print(msg); self.log_lines.append(msg)
+            self.portfolio_value = pd.Series(dtype=float, index=pd.to_datetime([]))
+            self.daily_df = pd.DataFrame(columns=["Date", "Ticker", "Close Price", "Shares", "Allocated Amount", "PnL", "Is_Rebalance_Day", "Trading Costs"])
+            self._calculate_performance_metrics(); return self.portfolio_value
 
-        # Finde ersten Rebalance-Zeitpunkt, für den genug Handelstage vorhanden sind
-        returns_idx = returns.index
-        first_valid_idx = None
-        for i, entry in enumerate(rebalance_schedule):
-            rebalance_date = entry["end_date"]
-            if rebalance_date not in returns_idx:
-                # Nimm den letzten verfügbaren Handelstag VOR oder GLEICH rebalance_date
-                past_dates = returns_idx[returns_idx <= rebalance_date]
-                if len(past_dates) == 0:
-                    continue
-                rebalance_date = past_dates[-1]
-                entry["end_date"] = rebalance_date
-            window_idx = returns_idx.get_loc(rebalance_date)
-            if window_idx >= self.window_days:
-                first_valid_idx = i
-                break
-        if first_valid_idx is not None:
-            rebalance_schedule = rebalance_schedule[first_valid_idx:]
-        else:
-            print("❌ Nicht genug Historie für dein Rolling Window!")
-            print("Du brauchst Preisdaten ab:", self.user_start_date - pd.Timedelta(days=self.window_days+5))
-            print("Erster möglicher Rebalance wäre frühestens:", returns.index[self.window_days])
-            return
-
-
-        # Erwartete Monate für späteres Reporting
-        if len(rebalance_schedule) == 0:
-            print(f"❌ Kein gültiger Rebalance-Termin im gesamten Zeitraum!")
-            return
-
-        first_rebalance_date = rebalance_schedule[0]['end_date']
-        expected_months = pd.date_range(
-            start=first_rebalance_date,
-            end=self.price_data.index.max(),
-            freq="ME"
-        ).to_period("M")
-
-        balance = self.start_balance
+        # 3. Initialisierungen für den Backtest-Loop
         self.current_cash = self.start_balance
-        portfolio_values = pd.Series(index=self.price_data.index, dtype=float)
-        self.selection_details = []
-        current_positions = {}
-        daily_data = []
-        monthly_allocations = []
+        backtest_relevant_dates = self.price_data.loc[self.user_start_date:].index # Nur Daten ab User-Start
+        portfolio_values = pd.Series(index=backtest_relevant_dates, dtype=float)
+        
+        current_positions: Dict[str, Dict[str, Any]] = {}
+        daily_log_list: List[Dict[str, Any]] = []
+        monthly_alloc_log_list: List[Dict[str, Any]] = []
         self.total_trading_costs = 0.0
+        last_known_prices: Dict[str, float] = {}
 
-        last_prices = {}    # Speichert letzten Preis je Ticker für PnL
+        # Fülle Portfolio-Wert für Tage vor dem ersten Rebalancing
+        if not backtest_relevant_dates.empty:
+            first_rebal_date = rebalance_schedule[0]['end_date']
+            pre_rebal_days = backtest_relevant_dates[backtest_relevant_dates < first_rebal_date]
+            if not pre_rebal_days.empty:
+                portfolio_values.loc[pre_rebal_days] = self.start_balance
 
-        for entry in rebalance_schedule:
-            start_date = entry["start_date"]
-            end_date = entry["end_date"]  # Das ist der Tag, an dem das Rebalancing stattfindet
-            rebalance_date = end_date
+        # 4. Haupt-Backtest-Schleife über Rebalancing-Perioden
+        for schedule_entry in rebalance_schedule:
+            period_calc_start_date = schedule_entry["start_date"] # Für tägliche PnL
+            rebalance_action_date = schedule_entry["end_date"]   # Tag des Rebalancings
 
-            # 1) Performance TRACKING für ALLE Tage des Intervalls (mit aktuellen Positionen!)
-            days = self.price_data.loc[start_date:end_date].index
+            # Tage für die tägliche Wertentwicklung in diesem Segment (ab User-Start)
+            segment_tracking_start = max(period_calc_start_date, self.user_start_date)
+            days_in_current_segment = self.price_data.loc[segment_tracking_start:rebalance_action_date].index
 
-            for day in days:
-                # Berechne den Portfolio-Wert mit aktuellen Positionen für diesen Tag
-                day_pnl_sum = 0
-                for ticker, pos in current_positions.items():
-                    price = self.price_data.at[day, ticker] if ticker in self.price_data.columns else np.nan
-                    shares = pos["shares"]
-                    weight = pos["weight"]
-                    alloc_amount = shares * price
+            # 4.1 Tägliche Portfolio-Wertentwicklung innerhalb des Segments
+            for day_num_in_segment, current_day in enumerate(days_in_current_segment):
+                if current_day < self.user_start_date: continue
 
-                    # PnL nur ab Tag 2
-                    if ticker in last_prices:
-                        pnl = (price - last_prices[ticker]) * shares
-                    else:
-                        pnl = 0
-                    last_prices[ticker] = price
-                    day_pnl_sum += pnl
+                current_day_equity_value = 0.0
+                temp_last_prices_today: Dict[str, float] = {}
 
-                    daily_data.append({
-                        "Date": day,
-                        "Ticker": ticker,
-                        "Close Price": price,
-                        "Shares": shares,
-                        "Allocated Amount": alloc_amount,
-                        "Allocated Percentage (%)": weight * 100,
-                        "PnL": pnl,
-                        "Is_Rebalance_Day": day == rebalance_date,
-                        "Trading Costs": pos.get("trading_costs", 0) if day == rebalance_date else 0,
-                    })
-                # Nur 1x pro Tag der Portfolio-Wert (inkl. Cash!)
-                total_value = sum(pos["shares"] * self.price_data.at[day, t]
-                                for t, pos in current_positions.items() if t in self.price_data.columns) + self.current_cash
-                portfolio_values[day] = total_value
+                for ticker, position_data in current_positions.items():
+                    if ticker in self.price_data.columns and current_day in self.price_data.index:
+                        price_today = self.price_data.at[current_day, ticker]
+                        shares_held = position_data.get("shares", 0)
 
-            # 2) AM LETZTEN TAG DES INTERVALLS: REBALANCING!
-            # Nur am rebalance_date (=end_date) erfolgt die Umschichtung
-            # (danach laufen die neuen Positionen ab dem nächsten Intervall)
-            if rebalance_date in self.price_data.index:
-                # === Overlay (Aktienquote) bestimmen wie gehabt ===
-                overlay_data = pd.DataFrame({
-                    "close": self.price_data.loc[(rebalance_date - pd.Timedelta(days=self.window_days)):rebalance_date].mean(axis=1),
-                    "sentiment": np.random.normal(0, 1, size=len(self.price_data.loc[(rebalance_date - pd.Timedelta(days=self.window_days)):rebalance_date]))
-                })
+                        if pd.notna(price_today) and shares_held > 0:
+                            current_day_equity_value += shares_held * price_today
+                            
+                            price_yesterday = last_known_prices.get(ticker)
+                            pnl_for_ticker_today = 0.0
+                            if price_yesterday is not None and pd.notna(price_yesterday):
+                                pnl_for_ticker_today = (price_today - price_yesterday) * shares_held
+                            
+                            temp_last_prices_today[ticker] = price_today
+                            
+                            is_rebalance_action_day = (current_day == rebalance_action_date and day_num_in_segment == len(days_in_current_segment) -1)
+                            daily_log_list.append({
+                                "Date": current_day, "Ticker": ticker, "Close Price": price_today,
+                                "Shares": shares_held, "Allocated Amount": shares_held * price_today,
+                                "PnL": pnl_for_ticker_today, 
+                                "Is_Rebalance_Day": is_rebalance_action_day,
+                                "Trading Costs": position_data.get("trading_costs_today", 0.0) # Kosten nur am Rebalancing-Tag
+                            })
+                            position_data["trading_costs_today"] = 0.0 # Reset für den nächsten Tag
                 
-                # Rolling Window: Immer die letzten self.window_days HANDELSTAGE bis inklusive rebalance_date!
-                if rebalance_date not in returns.index:
-                    continue  # Kein Preis für diesen Tag
+                last_known_prices.update(temp_last_prices_today)
+                portfolio_values.loc[current_day] = current_day_equity_value + self.current_cash
 
-                window_idx = returns.index.get_loc(rebalance_date)
-                if window_idx < self.window_days - 1:
-                    continue  # Nicht genug Historie
-
-                # Rolling Window holen
-                sub_returns = returns.iloc[window_idx - self.window_days + 1 : window_idx + 1]
-
-                # Ticker mit mindestens 95% Daten im Window
-                min_valid_days = int(self.window_days * 0.95)  # oder 0.95, je nach Wunsch!
-                valid_tickers = [col for col in sub_returns.columns if sub_returns[col].count() >= min_valid_days]
-
-                if len(valid_tickers) == 0:
-                    # KEIN einziger Ticker mit ausreichend Daten → Monat überspringen
+            # 4.2 Rebalancing-Aktion am Ende des Segments (rebalance_action_date)
+            if rebalance_action_date in self.price_data.index and rebalance_action_date >= self.user_start_date:
+                portfolio_val_pre_rebal = portfolio_values.get(rebalance_action_date, self.current_cash + current_day_equity_value) # type: ignore
+                
+                returns_window_idx = returns.index.get_loc(rebalance_action_date)
+                sub_returns = returns.iloc[returns_window_idx - self.window_days + 1 : returns_window_idx + 1]
+                
+                min_days_for_valid = int(self.window_days * 0.90)
+                valid_tickers_for_rebal = [col for col in sub_returns.columns if sub_returns[col].count() >= min_days_for_valid]
+                
+                if not valid_tickers_for_rebal:
+                    self.log_lines.append(f"WARNUNG: Keine validen Ticker für Rebalancing am {rebalance_action_date}. Positionen werden gehalten.")
                     continue
 
-                # Nimm ALLE verfügbaren Ticker, egal wie viele das sind (solange >0)
-                sub_returns = sub_returns[valid_tickers].fillna(0)
-                n_stocks = min(self.num_stocks, len(valid_tickers))
+                num_available_for_selection = len(valid_tickers_for_rebal)
+                
+                # Standard-Ziel: 100% Aktien, gleichgewichtet über verfügbare Ticker
+                target_equity_alloc_quote = 1.0 
+                relative_equity_weights = {t: 1.0 / num_available_for_selection for t in valid_tickers_for_rebal if num_available_for_selection > 0}
 
+                # --- Risk Overlay Anwendung (falls aktiviert) ---
+                if self.risk_overlay:
+                    # ... (Deine Risk Overlay Logik zur Anpassung von target_equity_alloc_quote und relative_equity_weights) ...
+                    # Diese Logik habe ich aus deinem vorherigen Code übernommen.
+                    day_df_overlay = pd.DataFrame(index=[rebalance_action_date])
+                    if valid_tickers_for_rebal: day_df_overlay["close"] = self.price_data.loc[rebalance_action_date, valid_tickers_for_rebal].mean()
+                    else: day_df_overlay["close"] = 0 
+                    day_df_overlay["sentiment"] = 0.0 # Dummy
+                    base_orders_overlay = {t: 1.0 / num_available_for_selection for t in valid_tickers_for_rebal if num_available_for_selection > 0}
+                    try:
+                        overlay_adj_weights = self.risk_overlay.apply(date=rebalance_action_date, data=day_df_overlay, base_orders=base_orders_overlay)
+                        target_equity_alloc_quote = sum(overlay_adj_weights.values())
+                        if target_equity_alloc_quote > 1e-6: # Kleine Schwelle
+                            relative_equity_weights = {t: w / target_equity_alloc_quote for t, w in overlay_adj_weights.items()}
+                        else: relative_equity_weights = {t: 0 for t in valid_tickers_for_rebal}
+                    except Exception as e_overlay:
+                        self.log_lines.append(f"FEHLER RiskOverlay.apply: {e_overlay}. Verwende 100% Aktien.")
+                        target_equity_alloc_quote = 1.0
 
-
-
-                available = sub_returns.shape[1]
-
-                if self.risk_overlay is not None:
-                    agg_scores = self.risk_overlay.aggregate_scores(overlay_data)
-                    ziel_aktienquote = self.risk_overlay.map_to_equity_weight(agg_scores)
-                else:
-                    ziel_aktienquote = 1.0
-
-                if ziel_aktienquote == 0:
-                    liquidation_value = 0
-                    for ticker, pos in current_positions.items():
-                        if ticker in self.price_data.columns:
-                            price = self.price_data.at[rebalance_date, ticker]
-                            if not np.isnan(price):
-                                liquidation_value += pos["shares"] * price
-                    self.current_cash += liquidation_value
-                    current_positions = {}
-                    # ... Log etc.
-                else:
-                    if available == 0:
-                        continue
-                    n_stocks = min(self.num_stocks, available)
-                    top_universe = select_top_sharpe_tickers(sub_returns, top_universe_size)
-                    filtered_returns = sub_returns[top_universe]
+                # --- Positionsanpassung basierend auf Zielaktienquote und relativen Gewichten ---
+                if target_equity_alloc_quote < 1e-6: # Ziel ist praktisch Cash
+                    value_of_pos_pre_liq = sum(pos.get("shares",0) * self.price_data.at[rebalance_action_date, t] for t, pos in current_positions.items() if t in self.price_data.columns and pd.notna(self.price_data.at[rebalance_action_date, t]))
+                    costs_this_rebal_event, temp_alloc_log_liq = self._execute_liquidation(rebalance_action_date, current_positions, portfolio_val_pre_rebal)
+                    current_positions = {} # Alle Positionen verkauft
+                    monthly_alloc_log_list.extend(temp_alloc_log_liq)
+                    
+                    # Log Liquidation für selection_details
+                    self.selection_details.append({
+                        "Rebalance Date": pd.to_datetime(rebalance_action_date).strftime('%Y-%m-%d'),
+                        "Actual Rebalance Day": pd.to_datetime(rebalance_action_date).strftime('%Y-%m-%d'),
+                        "Top Universe Size": num_available_for_selection,
+                        "Selected Tickers": "CASH (Full Liquidation)",
+                        "Optimization Method": "N/A", "Cov Estimator": "N/A", "Rebalance Frequency": self.rebalance_freq,
+                        "Total Trading Costs": costs_this_rebal_event,
+                        "Trading Costs %": (costs_this_rebal_event / value_of_pos_pre_liq * 100) if value_of_pos_pre_liq > 0 else 0.0
+                    })
+                else: # Normales Rebalancing
+                    n_stocks_final_selection = min(self.num_stocks, num_available_for_selection)
+                    optimizer_output_weights = pd.Series(dtype=float)
+                    tickers_from_optimizer = []
 
                     if self.optimization_mode == "select-then-optimize":
-                        top_tickers = filtered_returns.columns[:n_stocks]
-                        filtered_top = filtered_returns[top_tickers]
-                        weights_series = optimize_portfolio(
-                            returns=filtered_top,
-                            method=self.optimizer_method,
-                            cov_estimator=self.cov_estimator,
-                            min_weight=self.min_weight,
-                            max_weight=self.max_weight,
-                            force_equal_weight=self.force_equal_weight,
-                            debug_label="A - Optimizer only weight",
-                            num_stocks=n_stocks,
-                        )
-                    else:
-                        weights_full = optimize_portfolio(
-                            returns=filtered_returns,
-                            method=self.optimizer_method,
-                            cov_estimator=self.cov_estimator,
-                            min_weight=self.min_weight,
-                            max_weight=self.max_weight,
-                            force_equal_weight=self.force_equal_weight,
-                            debug_label="B - Optimizer selects & weights",
-                            num_stocks=n_stocks,
-                        )
-                        top_tickers = weights_full.sort_values(ascending=False).head(n_stocks).index.tolist()
-                        weights_series = weights_full.loc[top_tickers]
+                        top_sharpe_tickers = select_top_sharpe_tickers(sub_returns[valid_tickers_for_rebal], n_stocks_final_selection)
+                        if not top_sharpe_tickers.empty:
+                            optimizer_output_weights = optimize_portfolio(returns=sub_returns[top_sharpe_tickers], method=self.optimizer_method, cov_estimator=self.cov_estimator, min_weight=self.min_weight, max_weight=self.max_weight, force_equal_weight=self.force_equal_weight, num_stocks=len(top_sharpe_tickers))
+                            tickers_from_optimizer = top_sharpe_tickers.tolist()
+                    elif self.optimization_mode == "optimize-subset":
+                        optimizer_output_weights = optimize_portfolio(returns=sub_returns[valid_tickers_for_rebal], method=self.optimizer_method, cov_estimator=self.cov_estimator, min_weight=self.min_weight, max_weight=self.max_weight, force_equal_weight=self.force_equal_weight, num_stocks=n_stocks_final_selection)
+                        tickers_from_optimizer = optimizer_output_weights.index.tolist()
+                    
+                    if optimizer_output_weights.empty or optimizer_output_weights.sum() < 0.99:
+                        self.log_lines.append(f"WARNUNG: Optimizer ergab keine gültigen Gewichte am {rebalance_action_date}. Halte Positionen."); continue
 
-                    total_portfolio_value = sum(
-                        pos["shares"] * self.price_data.at[rebalance_date, t]
-                        for t, pos in current_positions.items()
-                        if t in self.price_data.columns and not np.isnan(self.price_data.at[rebalance_date, t])
-                    ) + self.current_cash
+                    # Kombiniere Overlay-relative Gewichte mit Optimizer-Gewichten
+                    final_target_weights_dict = {
+                        t: relative_equity_weights.get(t, 0) * optimizer_output_weights.get(t, 0)
+                        for t in tickers_from_optimizer if t in relative_equity_weights
+                    }
+                    final_target_weights_series = pd.Series(final_target_weights_dict).loc[lambda x: x > 1e-6]
 
-                    # 2) Ziel­allokation berechnen
-                    target_equity_value = total_portfolio_value * ziel_aktienquote
-                    weights = weights_series.values           
-                    investierbarer_betrag = target_equity_value
-
-                    current_positions, new_allocs = allocate_positions(
-                        self.price_data,
-                        top_tickers,
-                        weights,
-                        rebalance_date,
-                        investierbarer_betrag,
-                        previous_positions=current_positions,
-                        enable_trading_costs=self.enable_trading_costs,
-                        fixed_cost_per_trade=self.fixed_cost_per_trade,
-                        variable_cost_pct=self.variable_cost_pct,
+                    if final_target_weights_series.empty or final_target_weights_series.sum() == 0:
+                        self.log_lines.append(f"WARNUNG: Keine validen kombinierten Gewichte am {rebalance_action_date}. Halte Positionen."); continue
+                    
+                    # Normalisiere die kombinierten Gewichte, sodass ihre Summe 1 ergibt (innerhalb des Aktienanteils)
+                    final_target_weights_series /= final_target_weights_series.sum() 
+                    
+                    # Tatsächliche Allokation basierend auf Zielaktienquote und normalisierten Gewichten
+                    investable_amount_for_equity = portfolio_val_pre_rebal * target_equity_alloc_quote
+                    
+                    current_positions, alloc_log_for_rebal = allocate_positions(
+                        self.price_data, final_target_weights_series.index.tolist(), final_target_weights_series.values,
+                        rebalance_action_date, investable_amount_for_equity, current_positions.copy(),
+                        self.enable_trading_costs, self.fixed_cost_per_trade, self.variable_cost_pct
                     )
                     
-                    invested = sum(alloc.get("Value", 0)            # korrektes Feld
-                    for alloc in new_allocs
-                    if alloc.get("Ticker") != "TOTAL_COSTS")
+                    invested_value_this_rebal = sum(alloc.get("Value", 0.0) for alloc in alloc_log_for_rebal if alloc.get("Ticker") != "TOTAL_COSTS")
+                    costs_this_rebal_event = next((alloc.get("Trading Costs", 0.0) for alloc in alloc_log_for_rebal if alloc.get("Ticker") == "TOTAL_COSTS"), 0.0)
+                    
+                    self.current_cash = portfolio_val_pre_rebal - invested_value_this_rebal - costs_this_rebal_event
+                    self.total_trading_costs += costs_this_rebal_event
+                    monthly_alloc_log_list.extend(alloc_log_for_rebal)
 
-                    costs    = next(                                   # nur die Summary-Zeile
-                                (alloc["Trading Costs"] for alloc in new_allocs
-                                 if alloc.get("Ticker") == "TOTAL_COSTS"),
-                                0.0)
-                    self.current_cash = total_portfolio_value - invested - costs
-                    self.total_trading_costs += costs
+                    # --- Logging für selection_details (Normales Rebalancing) ---
                     self.selection_details.append({
-                        "Rebalance Date": rebalance_date,
-                        "Actual Rebalance Day": rebalance_date,
-                        "Top Universe Size": len(valid_tickers),
-                        "Optimization Method": self.optimizer_method,
-                        "Cov Estimator": self.cov_estimator,
-                        "Selected Tickers": valid_tickers,
+                        "Rebalance Date": pd.to_datetime(rebalance_action_date).strftime('%Y-%m-%d'),
+                        "Actual Rebalance Day": pd.to_datetime(rebalance_action_date).strftime('%Y-%m-%d'),
+                        "Top Universe Size": num_available_for_selection,
+                        "Selected Tickers": ", ".join(sorted(final_target_weights_series.index.tolist())),
+                        "Optimization Method": self.optimizer_method, "Cov Estimator": self.cov_estimator,
                         "Rebalance Frequency": self.rebalance_freq,
-                        "Total Trading Costs": self.total_trading_costs,
-                        "Trading Costs %": (self.total_trading_costs/self.start_balance)*100,
+                        "Total Trading Costs": costs_this_rebal_event,
+                        "Trading Costs %": (costs_this_rebal_event / portfolio_val_pre_rebal * 100) if portfolio_val_pre_rebal and portfolio_val_pre_rebal > 0 else 0.0,
+                        # Optional: "Target Equity Quote": target_equity_alloc_quote*100
                     })
-                    monthly_allocations.extend(new_allocs)
 
-        # Ergebnis-DataFrames füllen
-        self.portfolio_value     = portfolio_values.dropna()
-        self.true_daily_portfolio_pnl = self.portfolio_value.diff().fillna(0)
-        self.daily_df            = pd.DataFrame(daily_data)
-        self.monthly_allocations = pd.DataFrame(monthly_allocations)
+                # Aktualisiere Portfoliowert am Rebalancing-Tag
+                if rebalance_action_date in portfolio_values.index:
+                    final_equity_after_rebal = sum(pos.get("shares",0) * self.price_data.at[rebalance_action_date, t] for t, pos in current_positions.items() if t in self.price_data.columns and pd.notna(self.price_data.at[rebalance_action_date, t]))
+                    portfolio_values.loc[rebalance_action_date] = final_equity_after_rebal + self.current_cash
+        
+        # 5. Finale Datenaufbereitung und Metriken
+        self.portfolio_value = portfolio_values.dropna()
+        self.daily_df = pd.DataFrame(daily_log_list)
+        if not self.daily_df.empty and not self.portfolio_value.empty and "Date" in self.daily_df.columns:
+            self.daily_df["Date"] = pd.to_datetime(self.daily_df["Date"])
+            pv_for_merge = self.portfolio_value.rename("Total Portfolio Value").reset_index()
+            pv_for_merge.columns = ["Date", "Total Portfolio Value"] # Stelle Spaltennamen sicher
+            pv_for_merge["Date"] = pd.to_datetime(pv_for_merge["Date"])
+            merged_df = pd.merge(self.daily_df, pv_for_merge, on="Date", how="left")
+            if "Total Portfolio Value" in merged_df.columns and "Allocated Amount" in merged_df.columns:
+                merged_df["Allocated Percentage (%)"] = (merged_df["Allocated Amount"] / merged_df["Total Portfolio Value"] * 100).fillna(0)
+                self.daily_df = merged_df.drop(columns=["Total Portfolio Value"], errors='ignore')
 
-        # SUMMARY-Zeile für Trading-Kosten
+        self.monthly_allocations = pd.DataFrame(monthly_alloc_log_list)
+        
+        # Füge die SUMMARY-Zeile zu selection_details hinzu
         self.selection_details.append({
-            "Rebalance Date":      "SUMMARY",
-            "Actual Rebalance Day":"SUMMARY",
-            "Top Universe Size":   0,
-            "Optimization Method": "N/A",
-            "Cov Estimator":       "N/A",
-            "Selected Tickers":    "N/A",
-            "Rebalance Frequency": self.rebalance_freq,
+            "Rebalance Date": "SUMMARY", "Actual Rebalance Day": "SUMMARY",
+            "Top Universe Size": 0, "Selected Tickers": "N/A", "Optimization Method": "N/A", 
+            "Cov Estimator": "N/A", "Rebalance Frequency": self.rebalance_freq,
             "Total Trading Costs": self.total_trading_costs,
-            "Trading Costs %":     (self.total_trading_costs/self.start_balance)*100,
+            "Trading Costs %": (self.total_trading_costs / self.start_balance * 100) if self.start_balance > 0 else 0.0
         })
 
-        # Fehlende Monate protokollieren
-        actual_months = (
-            pd.to_datetime([d["Rebalance Date"] for d in self.selection_details if d["Rebalance Date"]!="SUMMARY"])
-            .to_series().dt.to_period("M").drop_duplicates()
-        )
-        self.missing_months = [
-            m.strftime("%Y-%m")
-            for m in expected_months
-            if m not in actual_months.values
-        ]
-        if self.missing_months:
-            log = "⚠️ Rebalance fehlt für folgende Monate: " + ", ".join(self.missing_months)
-            print(log)
-            self.log_lines.append(log)
+        # KORREKTUR: Logik für Next-Month Allocation
+        self.next_month_tickers = []
+        self.next_month_weights = pd.Series(dtype=float)
 
-        # — Next-Month Allocation analog berechnen (kürzere Logik) —
-        last_date = self.price_data.index.max()
-        idx = returns.index
-        if last_date not in returns.index:
-            sub_returns = pd.DataFrame()  # Defensive
-        else:
-            window_idx = returns.index.get_loc(last_date)
-            if window_idx < self.window_days:
-                sub_returns = pd.DataFrame()
-            else:
-                sub_returns = returns.iloc[window_idx - self.window_days + 1 : window_idx + 1]
+        if not returns.empty:
+            last_data_date_for_returns = returns.index.max() # Letztes Datum im Returns-Index
+            
+            # Stelle sicher, dass das Datum auch im Preisdatenindex für die Overlay-Indikatoren existiert
+            if last_data_date_for_returns in self.price_data.index:
+                nm_window_end_idx = returns.index.get_loc(last_data_date_for_returns)
 
+                if nm_window_end_idx >= self.window_days - 1:
+                    nm_sub_returns = returns.iloc[nm_window_end_idx - self.window_days + 1 : nm_window_end_idx + 1]
+                    
+                    nm_min_valid_days = int(self.window_days * 0.90)
+                    nm_valid_tickers_in_sub = [
+                        col for col in nm_sub_returns.columns if nm_sub_returns[col].count() >= nm_min_valid_days
+                    ]
 
+                    if nm_valid_tickers_in_sub:
+                        available_nm = len(nm_valid_tickers_in_sub)
+                        n_stocks_nm = min(self.num_stocks, available_nm)
+                        
+                        # Zielaktienquote für Next Month (optional, hier als 100% angenommen, wenn Overlay nicht detailliert für Prognose verwendet wird)
+                        nm_target_equity_exposure = 1.0
+                        nm_equity_weights_normalized_to_one = {t: 1/available_nm for t in nm_valid_tickers_in_sub}
 
-        available_nm = sub_returns.shape[1]
-        if available_nm == 0:
-            self.next_month_tickers = []
-            self.next_month_weights = pd.Series(dtype=float)
-        else:
-            n_nm = min(self.num_stocks, available_nm)
-            if self.optimization_mode == "select-then-optimize":
-                top_sharpe = select_top_sharpe_tickers(sub_returns, top_universe_size)[:n_nm]
-                weights_nm = optimize_portfolio(
-                    returns=sub_returns[top_sharpe],
-                    method=self.optimizer_method,
-                    cov_estimator=self.cov_estimator,
-                    min_weight=self.min_weight,
-                    max_weight=self.max_weight,
-                    force_equal_weight=self.force_equal_weight,
-                    debug_label="NextMonth A",
-                    num_stocks=n_nm,
-                )
-            else:
-                wf = optimize_portfolio(
-                    returns=sub_returns,
-                    method=self.optimizer_method,
-                    cov_estimator=self.cov_estimator,
-                    min_weight=self.min_weight,
-                    max_weight=self.max_weight,
-                    force_equal_weight=self.force_equal_weight,
-                    debug_label="NextMonth B",
-                    num_stocks=n_nm,
-                )
-                top_sharpe = wf.sort_values(ascending=False).head(n_nm).index.tolist()
-                weights_nm = wf.loc[top_sharpe]
+                        if self.risk_overlay: # Optional: Overlay auch für Next-Month-Prognose verwenden
+                            nm_day_df_for_overlay = pd.DataFrame(index=[last_data_date_for_returns])
+                            nm_day_df_for_overlay["close"] = self.price_data.loc[last_data_date_for_returns, nm_valid_tickers_in_sub].mean()
+                            nm_day_df_for_overlay["sentiment"] = 0.0 # Dummy
+                            
+                            nm_base_orders = {t: 1/available_nm for t in nm_valid_tickers_in_sub}
+                            try:
+                                nm_overlay_scaled_weights = self.risk_overlay.apply(date=last_data_date_for_returns, data=nm_day_df_for_overlay, base_orders=nm_base_orders)
+                                nm_target_equity_exposure = sum(nm_overlay_scaled_weights.values())
+                                if nm_target_equity_exposure > 0:
+                                    nm_equity_weights_normalized_to_one = {t: w / nm_target_equity_exposure for t, w in nm_overlay_scaled_weights.items()}
+                                else:
+                                    nm_equity_weights_normalized_to_one = {t: 0 for t in nm_valid_tickers_in_sub}
+                            except Exception as e:
+                                print(f"FEHLER bei RiskOverlay.apply für Next Month: {e}")
+                        
+                        if nm_target_equity_exposure > 0: # Nur optimieren, wenn investiert werden soll
+                            nm_final_optimizer_weights = pd.Series(dtype=float)
+                            nm_selected_tickers_for_portfolio = []
 
-            # im statischen Modus auf originale tickers einschränken
-            if self.universe_mode == "static":
-                top_sharpe = [t for t in top_sharpe if t in self.price_data.columns]
-                weights_nm = weights_nm.reindex(top_sharpe).fillna(0)
+                            if self.optimization_mode == "select-then-optimize":
+                                nm_top_tickers_idx = select_top_sharpe_tickers(nm_sub_returns[nm_valid_tickers_in_sub], n_stocks_nm)
+                                if not nm_top_tickers_idx.empty:
+                                    nm_final_optimizer_weights = optimize_portfolio(
+                                        returns=nm_sub_returns[nm_top_tickers_idx],
+                                        method=self.optimizer_method, cov_estimator=self.cov_estimator,
+                                        min_weight=self.min_weight, max_weight=self.max_weight,
+                                        force_equal_weight=self.force_equal_weight,
+                                        debug_label="NextMonth A (select-then-optimize)",
+                                        num_stocks=len(nm_top_tickers_idx))
+                                    nm_selected_tickers_for_portfolio = nm_top_tickers_idx.tolist()
+                            
+                            elif self.optimization_mode == "optimize-subset":
+                                nm_final_optimizer_weights = optimize_portfolio(
+                                    returns=nm_sub_returns[nm_valid_tickers_in_sub],
+                                    method=self.optimizer_method, cov_estimator=self.cov_estimator,
+                                    min_weight=self.min_weight, max_weight=self.max_weight,
+                                    force_equal_weight=self.force_equal_weight,
+                                    debug_label="NextMonth B (optimize-subset)",
+                                    num_stocks=n_stocks_nm)
+                                nm_selected_tickers_for_portfolio = nm_final_optimizer_weights.index.tolist()
 
-            self.next_month_tickers = top_sharpe
-            self.next_month_weights = weights_nm
-
+                            if not nm_final_optimizer_weights.empty:
+                                nm_combined_weights = {
+                                    t: nm_equity_weights_normalized_to_one.get(t, 0) * nm_final_optimizer_weights.get(t, 0)
+                                    for t in nm_selected_tickers_for_portfolio
+                                    if t in nm_equity_weights_normalized_to_one
+                                }
+                                nm_final_series = pd.Series(nm_combined_weights).loc[lambda x: x > 1e-6]
+                                if not nm_final_series.empty and nm_final_series.sum() > 0:
+                                    self.next_month_weights = (nm_final_series / nm_final_series.sum()) * nm_target_equity_exposure # Skaliert mit Zielquote
+                                    self.next_month_tickers = self.next_month_weights.index.tolist()
+                                else: # Keine validen Gewichte
+                                     self.next_month_weights = pd.Series(dtype=float)
+                                     self.next_month_tickers = []
+                            else: # Optimizer lieferte keine Gewichte
+                                self.next_month_weights = pd.Series(dtype=float)
+                                self.next_month_tickers = []
+                        else: # Zielaktienquote für Next Month ist 0
+                            self.next_month_weights = pd.Series(dtype=float) # Keine Gewichtung
+                            self.next_month_tickers = [] # Keine Ticker
+        
         print("🔮 Next-Month-Universe:", getattr(self, "next_month_tickers", []))
         
         self._calculate_performance_metrics()
 
-        # Ergebnisse auf Backtest-Start croppen
-        self.portfolio_value = self.portfolio_value.loc[self.user_start_date:]
-        self.daily_df = self.daily_df[self.daily_df["Date"] >= self.user_start_date]
-        self.true_daily_portfolio_pnl = self.true_daily_portfolio_pnl.loc[self.user_start_date:]
+        # Ergebnisse auf Backtest-Start zuschneiden (self.user_start_date)
+        if not self.portfolio_value.empty:
+             self.portfolio_value = self.portfolio_value.loc[self.user_start_date:]
+        if not self.daily_df.empty:
+            self.daily_df = self.daily_df[self.daily_df["Date"] >= self.user_start_date].reset_index(drop=True)
         
-
+        # true_daily_portfolio_pnl wird in _calculate_performance_metrics gesetzt
+        if hasattr(self, 'true_daily_portfolio_pnl') and not self.true_daily_portfolio_pnl.empty:
+             self.true_daily_portfolio_pnl = self.true_daily_portfolio_pnl.loc[self.user_start_date:]
 
         return self.portfolio_value
         
@@ -557,9 +568,10 @@ class SharpeBacktestEngine:
         # ------------------------------------------------------------
         # 0) Grundvoraussetzung
         # ------------------------------------------------------------
-        if self.portfolio_value.empty:
-            self.performance_metrics = pd.DataFrame()
-            self.monthly_performance = pd.DataFrame()
+        if self.portfolio_value.empty or "Date" not in self.daily_df.columns:
+            self.performance_metrics   = pd.DataFrame()
+            self.monthly_performance   = pd.DataFrame()
+            self.true_daily_portfolio_pnl = pd.Series(dtype=float)
             return
 
         # ------------------------------------------------------------
@@ -782,7 +794,7 @@ class SharpeBacktestEngine:
         Berechnet tägliche PnL basierend nur auf Marktbewegungen, 
         ohne Rebalancing-Effekte zu berücksichtigen.
         """
-        if self.daily_df.empty:
+        if self.daily_df.empty or "Date" not in self.daily_df.columns:
             return pd.Series(dtype=float, index=self.portfolio_value.index)
         
         # Stelle sicher, dass Date als datetime vorliegt

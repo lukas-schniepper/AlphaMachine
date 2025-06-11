@@ -1,14 +1,15 @@
-from .base import IndicatorBase, Mode
+# AlphaMachine_core/risk_overlay/indicators/ema.py
 import pandas as pd
+from ta.trend import EMAIndicator
 
-class EMAIndicator(IndicatorBase):
-    """Exponentieller Gleitender Durchschnitt – liefert positi­ven Score, wenn Kurs > EMA."""
-    mode = Mode.BOTH      # via JSON umstellbar
+def ema_value(eod_data: pd.DataFrame, params: dict) -> pd.Series:
+    """
+    Calculates the Exponential Moving Average (EMA) raw value.
+    """
+    window = params.get('window', 20) # Aus config: "params": {"window": 50}
 
-    def __init__(self, period: int = 50):
-        self.period = period
-
-    def calculate(self, data: pd.DataFrame) -> pd.Series:
-        ema = data["close"].ewm(span=self.period, adjust=False).mean()
-        score = (data["close"] / ema) - 1.0          # >0 ⇒ bullish
-        return self.normalize(score)
+    if 'close' not in eod_data.columns:
+        raise ValueError("Input DataFrame 'eod_data' for EMA must contain a 'close' column.")
+        
+    ema = ta.ema(eod_data['close'], length=window)
+    return ema

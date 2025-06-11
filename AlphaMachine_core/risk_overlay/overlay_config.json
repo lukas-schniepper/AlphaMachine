@@ -1,27 +1,145 @@
 {
+  "mapping": {
+    "type": "three_band",
+    "params": {
+      "threshold_map_min": -0.5,
+      "threshold_map_max": 0.5,
+      "min_allocation_pct": 0,
+      "max_allocation_pct": 100,
+      "low_band_alloc_pct": 0,
+      "mid_band_alloc_pct": 50,
+      "high_band_alloc_pct": 100,
+      "low_threshold": -0.3,
+      "high_threshold": 0.1,
+      "low": -0.3,
+      "high": 0.1
+    }
+  },
+  "hysteresis": {
+    "min_days_in_state": 3,
+    "hysteresis_pct_change": 10,
+    "min_allocation_change_pct": 5
+  },
+  "safe_asset_config": {
+    "default": "CASH",
+    "options": {
+      "CASH": {
+        "allocation_pct": 100
+      }
+    }
+  },
   "indicators": [
     {
+      "name": "SPY_SMA50",
       "path": "AlphaMachine_core.risk_overlay.indicators.sma",
       "class": "SMAIndicator",
-      "params": {"period": 50},
-      "mode": "risk_on"
+      "asset": "SPY",
+      "params": {
+        "period": 50
+      },
+      "weight": 1.0,
+      "transform": "minmax",
+      "transform_params": {
+        "lookback": 252,
+        "feature_range": "(-1,1)"
+      },
+      "direction": 1,
+      "mode": "risk_on",
+      "confidence_static": 1.0
     },
     {
-      "path": "AlphaMachine_core.risk_overlay.indicators.ma200",
-      "class": "MA200CloseIndicator",
-      "params": {"ma_period": 200, "days_below": 3},
-      "mode": "risk_off"
+      "name": "SPY_Price_Below_MA200_3Days",
+      "path": "AlphaMachine_core.risk_overlay.indicators.price_ma_signal",
+      "class": "PriceMAComparisonSignal",
+      "asset": "SPY",
+      "params": {
+        "ma_period": 200,
+        "consecutive_days": 3,
+        "signal_when_above": false
+      },
+      "weight": 2.0,
+      "transform": "none",
+      "direction": 1,
+      "mode": "risk_off",
+      "confidence_static": 1.0
     },
     {
+      "name": "SPY_EMACross_50_200",
       "path": "AlphaMachine_core.risk_overlay.indicators.ema_cross",
       "class": "EMACrossIndicator",
-      "params": {"fast": 50, "slow": 200}
+      "asset": "SPY",
+      "params": {
+        "fast": 50,
+        "slow": 200
+      },
+      "weight": 1.5,
+      "transform": "none",
+      "direction": 1,
+      "mode": "both",
+      "confidence_static": 1.0
     },
     {
+      "name": "AAII_Sentiment_ZScore",
       "path": "AlphaMachine_core.risk_overlay.indicators.sentiment",
       "class": "SentimentZScoreIndicator",
-      "params": {"column": "sentiment"},
-      "mode": "risk_on"
+      "asset": "AAII",
+      "params": {
+        "column": "sentiment_value",
+        "lookback": 104
+      },
+      "weight": 1.0,
+      "transform": "none",
+      "direction": 1,
+      "mode": "risk_on",
+      "confidence_static": 0.9
+    },
+    {
+      "name": "SPY_Drawdown_Value",
+      "path": "AlphaMachine_core.risk_overlay.indicators.drawdown_from_high",
+      "class": "DrawDownFromHighIndicator",
+      "asset": "SPY",
+      "params": {
+        "window": 252
+      },
+      "weight": 1.2,
+      "transform": "none",
+      "direction": 1,
+      "mode": "risk_on",
+      "confidence_static": 1.0
+    },
+    {
+      "name": "SPY_RSI14_Value",
+      "path": "AlphaMachine_core.risk_overlay.indicators.rsi",
+      "class": "RSIIndicator",
+      "asset": "SPY",
+      "params": {
+        "period": 14
+      },
+      "weight": 0.8,
+      "transform": "minmax",
+      "transform_params": {
+        "lookback": 100,
+        "feature_range": "(-1,1)"
+      },
+      "direction": -1,
+      "mode": "risk_off",
+      "confidence_static": 1.0
+    },
+    {
+      "name": "VIX_Above_30_Alert",
+      "path": "AlphaMachine_core.risk_overlay.indicators.vix",
+      "class": "VIXThresholdIndicator",
+      "asset": "^VIX",
+      "params": {
+        "level": 30,
+        "condition_above": true
+      },
+      "weight": 1.5,
+      "transform": "none",
+      "direction": 1,
+      "mode": "risk_off",
+      "confidence_static": 1.0
     }
-  ]
+  ],
+  "enabled": true
 }

@@ -1,0 +1,5 @@
+{
+  "cash":   { "ticker": "CASH",  "max_weight": 1.00 },
+  "bonds":  { "ticker": "IEF",   "max_weight": 0.00 },
+  "gold":   { "ticker": "GLD",   "max_weight": 0.00 }
+}

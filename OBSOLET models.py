@@ -1,4 +1,4 @@
-# AlphaMachine_core/models.py
+AlphaMachine_core/models.py
 
 from sqlmodel import SQLModel, Field
 from datetime import date
